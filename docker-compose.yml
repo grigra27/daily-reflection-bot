@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    container_name: daily-reflection-bot
+    env_file:
+      - .env
+    environment:
+      # Absolute path inside the container; the volume below persists it.
+      DATABASE_URL: "sqlite:////app/data/reflection.db"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

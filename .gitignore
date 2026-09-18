@@ -1,0 +1,39 @@
+# Environment & secrets
+.env
+*.env
+!.env.example
+
+# Local database & runtime data
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*
+!data/.gitkeep
+
+# Generated exports
+exports/
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store

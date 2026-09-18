@@ -1,0 +1,135 @@
+"""Inline keyboards for the bot.
+
+Emoji/labels live here (presentation). Callback data is intentionally compact
+and encodes only the integer score, never a display value.
+"""
+
+from __future__ import annotations
+
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from app.bot import texts
+
+SCORES = (1, 2, 3, 4, 5)
+
+
+def _score_row(field: str, emoji: dict[int, str]) -> list[InlineKeyboardButton]:
+    return [
+        InlineKeyboardButton(text=f"{emoji[v]} {v}", callback_data=f"ci:{field}:{v}")
+        for v in SCORES
+    ]
+
+
+def day_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[_score_row("day", texts.DAY_EMOJI)]
+    )
+
+
+def mood_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[_score_row("mood", texts.MOOD_EMOJI)]
+    )
+
+
+def energy_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[_score_row("energy", texts.ENERGY_EMOJI)]
+    )
+
+
+def reflection_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✍️ Записать", callback_data="ci:ref:yes"),
+                InlineKeyboardButton(text="Пропустить", callback_data="ci:ref:no"),
+            ]
+        ]
+    )
+
+
+def skip_keyboard(callback_prefix: str) -> InlineKeyboardMarkup:
+    """A single 'skip' button used in text-entry steps (weekly/optional text)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Пропустить", callback_data=f"{callback_prefix}:skip")]
+        ]
+    )
+
+
+def today_edit_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="✏️ Изменить", callback_data="act:edit")]]
+    )
+
+
+def today_fill_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="📝 Заполнить сейчас", callback_data="act:checkin")]]
+    )
+
+
+def filled_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👀 Посмотреть", callback_data="act:today"),
+                InlineKeyboardButton(text="✏️ Изменить", callback_data="act:edit"),
+            ]
+        ]
+    )
+
+
+def reminder_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="📝 Заполнить", callback_data="act:checkin")]]
+    )
+
+
+def weekly_offer_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да", callback_data="wk:start"),
+                InlineKeyboardButton(text="Не сейчас", callback_data="wk:no"),
+            ]
+        ]
+    )
+
+
+def stats_keyboard(active: int) -> InlineKeyboardMarkup:
+    def btn(days: int, label: str) -> InlineKeyboardButton:
+        prefix = "▸ " if days == active else ""
+        return InlineKeyboardButton(text=f"{prefix}{label}", callback_data=f"st:{days}")
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[btn(7, "7 дней"), btn(30, "30 дней"), btn(90, "90 дней"), btn(365, "Год")]]
+    )
+
+
+def export_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Последние 30 дней", callback_data="ex:30d"),
+                InlineKeyboardButton(text="Последние 90 дней", callback_data="ex:90d"),
+            ],
+            [
+                InlineKeyboardButton(text="Текущий год", callback_data="ex:year"),
+                InlineKeyboardButton(text="Всё время", callback_data="ex:all"),
+            ],
+        ]
+    )
+
+
+def settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🕘 Время вопроса", callback_data="se:checkin"),
+                InlineKeyboardButton(text="🔔 Напоминание", callback_data="se:reminder"),
+            ],
+            [InlineKeyboardButton(text="🌍 Часовой пояс", callback_data="se:tz")],
+        ]
+    )
