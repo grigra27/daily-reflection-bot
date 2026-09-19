@@ -8,11 +8,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.bot import keyboards, texts
-from app.bot.deps import AuthorizedFilter, unauthorized_filter
+from app.bot.deps import AuthorizedFilter, PrivateChatFilter, display_name, unauthorized_filter
+from app.database.session import session_scope
+from app.runtime import get_runtime
+from app.services.auth_service import authorize
 
 router = Router(name="start")
-router.message.filter(AuthorizedFilter())
-router.callback_query.filter(AuthorizedFilter())
+router.message.filter(AuthorizedFilter(), PrivateChatFilter())
+router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
 
 
 async def send_welcome(message: Message) -> None:
@@ -22,6 +25,20 @@ async def send_welcome(message: Message) -> None:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
+    # Onboarding must be idempotent: create/refresh the user and (re)register
+    # their scheduler jobs before welcoming, so a first-ever /start after a
+    # cold scheduler sync still gets daily check-ins without an app restart.
+    runtime = get_runtime()
+    with session_scope(runtime.session_factory) as session:
+        user = authorize(
+            session,
+            runtime.settings,
+            message.from_user.id,
+            display_name=display_name(message),
+        )
+        user_pk = user.id
+    if runtime.scheduler is not None:
+        runtime.scheduler.reschedule_user(user_pk)
     await send_welcome(message)
 
 

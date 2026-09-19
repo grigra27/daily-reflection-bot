@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable  # noqa: F401  (kept for typing helpers)
 
+from aiogram.enums import ChatType
 from aiogram.filters import BaseFilter, Filter
 from aiogram.types import CallbackQuery, Message
 
@@ -26,6 +27,19 @@ class AuthorizedFilter(BaseFilter):
             return False
         settings = get_runtime().settings
         return from_user.id in settings.allowed_telegram_ids
+
+
+class PrivateChatFilter(BaseFilter):
+    """This is a private reflection bot: never render personal data in groups.
+
+    Applied alongside the authorization filter on every functional router; a
+    command issued in a group chat is silently ignored.
+    """
+
+    async def __call__(self, event: Message | CallbackQuery) -> bool:
+        if isinstance(event, CallbackQuery):
+            return event.message is not None and event.message.chat.type == ChatType.PRIVATE
+        return event.chat.type == ChatType.PRIVATE
 
 
 # A filter that matches unauthorised users (inverse of the allow-list).

@@ -9,7 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from app.bot import keyboards, texts
-from app.bot.deps import AuthorizedFilter
+from app.bot.deps import AuthorizedFilter, PrivateChatFilter
 from app.database.repositories import DailyEntryRepository
 from app.database.session import session_scope
 from app.runtime import get_runtime
@@ -18,8 +18,8 @@ from app.services.auth_service import authorize
 from app.services.time_service import user_today
 
 router = Router(name="stats")
-router.message.filter(AuthorizedFilter())
-router.callback_query.filter(AuthorizedFilter())
+router.message.filter(AuthorizedFilter(), PrivateChatFilter())
+router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
 
 _DEFAULT_PERIOD = 30
 

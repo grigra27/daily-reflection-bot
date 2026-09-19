@@ -7,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from app.bot import keyboards
-from app.bot.deps import AuthorizedFilter
+from app.bot.deps import AuthorizedFilter, PrivateChatFilter
 from app.database.session import session_scope
 from app.runtime import get_runtime
 from app.services import export_service
@@ -15,8 +15,8 @@ from app.services.auth_service import authorize
 from app.services.time_service import user_today
 
 router = Router(name="export")
-router.message.filter(AuthorizedFilter())
-router.callback_query.filter(AuthorizedFilter())
+router.message.filter(AuthorizedFilter(), PrivateChatFilter())
+router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
 
 
 @router.message(Command("export"))

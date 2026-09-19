@@ -86,6 +86,35 @@ def test_upsert_updates_existing(session: Session, user: User) -> None:
     assert second.reflection_text == "edited"
 
 
+def test_upsert_survives_concurrent_insert(session: Session, user: User, monkeypatch) -> None:
+    # Simulate a double-tap race: the row was already committed by "request A",
+    # but "request B"'s initial SELECT ran before that and saw nothing, so its
+    # INSERT hits the UNIQUE constraint. upsert must fall back to an UPDATE.
+    repo = DailyEntryRepository(session)
+    winner = repo.upsert(
+        user_id=user.id, entry_date=date(2026, 9, 4),
+        day_score=2, mood_score=2, energy_score=2, reflection_text="A",
+    )
+    original_get = DailyEntryRepository.get
+    calls = {"n": 0}
+
+    def racy_get(self, user_id, entry_date):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return original_get(self, user_id, entry_date)
+
+    monkeypatch.setattr(DailyEntryRepository, "get", racy_get)
+    loser = repo.upsert(
+        user_id=user.id, entry_date=date(2026, 9, 4),
+        day_score=5, mood_score=4, energy_score=3, reflection_text="B",
+    )
+    assert loser.id == winner.id  # still exactly one row
+    assert loser.day_score == 5
+    assert loser.reflection_text == "B"
+    assert calls["n"] >= 2  # the INSERT path really was taken and recovered
+
+
 def test_score_check_constraint(session: Session, user: User) -> None:
     session.add(
         DailyEntry(

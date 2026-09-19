@@ -21,7 +21,9 @@ from app.database.session import create_engine_and_factory, session_scope
 def settings() -> Settings:
     return Settings(
         telegram_bot_token="test-token",
-        allowed_telegram_ids="111,222",
+        # Must be the real model field: the bare ``allowed_telegram_ids``
+        # keyword is a property, not a field, and would be silently dropped.
+        allowed_telegram_ids_raw="111,222",
         default_timezone="Europe/Moscow",
         default_checkin_time="21:30",
         default_reminder_time="23:00",

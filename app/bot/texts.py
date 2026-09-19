@@ -7,6 +7,7 @@ from data). Tone: short, calm, neutral, no psychological interpretation.
 
 from __future__ import annotations
 
+import html
 from datetime import date
 
 _MONTHS_RU = [
@@ -77,7 +78,9 @@ def today_message(entry_day: date, day: int, mood: int, energy: int, reflection:
         f"Энергия: {ENERGY_EMOJI[energy]} {energy}/5",
     ]
     if reflection:
-        lines += ["", f"💬 {reflection}"]
+        # User text is untrusted: messages are sent with ParseMode.HTML, so
+        # escape it; the app's own markup above stays literal.
+        lines += ["", f"💬 {html.escape(reflection)}"]
     return "\n".join(lines)
 
 

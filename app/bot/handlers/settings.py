@@ -16,7 +16,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.orm import Session
 
 from app.bot import keyboards, texts
-from app.bot.deps import AuthorizedFilter
+from app.bot.deps import AuthorizedFilter, PrivateChatFilter
 from app.bot.states import SettingsStates
 from app.database.models import User
 from app.database.session import session_scope
@@ -26,8 +26,8 @@ from app.services.auth_service import authorize
 from app.services.settings_service import InvalidSettingError
 
 router = Router(name="settings")
-router.message.filter(AuthorizedFilter())
-router.callback_query.filter(AuthorizedFilter())
+router.message.filter(AuthorizedFilter(), PrivateChatFilter())
+router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
 
 
 async def _render_settings(message: Message) -> None:

@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.bot import keyboards, texts
-from app.bot.deps import AuthorizedFilter
+from app.bot.deps import AuthorizedFilter, PrivateChatFilter
 from app.bot.states import CheckinStates
 from app.database.session import session_scope
 from app.runtime import get_runtime
@@ -20,8 +20,8 @@ from app.services import checkin_service, weekly_service
 from app.services.auth_service import authorize
 
 router = Router(name="daily")
-router.message.filter(AuthorizedFilter())
-router.callback_query.filter(AuthorizedFilter())
+router.message.filter(AuthorizedFilter(), PrivateChatFilter())
+router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
 
 
 # --------------------------------------------------------------------------
@@ -51,7 +51,7 @@ async def menu_checkin(message: Message) -> None:
 
 @router.message(F.text == keyboards.reply.BTN_TODAY)
 async def menu_today(message: Message) -> None:
-    await _show_today(message)
+    await _show_today(message, message.from_user.id)
 
 
 @router.message(Command("checkin"))
@@ -71,7 +71,7 @@ async def cb_start_checkin(cb: CallbackQuery) -> None:
 async def cb_show_today(cb: CallbackQuery) -> None:
     await cb.answer()
     if cb.message:
-        await _show_today(cb.message)
+        await _show_today(cb.message, cb.from_user.id)
 
 
 # --------------------------------------------------------------------------
@@ -110,7 +110,9 @@ async def step_energy(cb: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(CheckinStates.ask_reflection, F.data == "ci:ref:no")
 async def skip_reflection(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
-    await _finalize(cb.message, state, reflection_text=None)
+    # Identity comes from cb.from_user: cb.message was sent by the bot, so its
+    # from_user is the bot itself, never the person tapping the button.
+    await _finalize(cb.message, state, reflection_text=None, telegram_user_id=cb.from_user.id)
 
 
 @router.callback_query(CheckinStates.ask_reflection, F.data == "ci:ref:yes")
@@ -128,31 +130,36 @@ async def ask_reflection_text(cb: CallbackQuery, state: FSMContext) -> None:
 )
 async def skip_reflection_text(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
-    await _finalize(cb.message, state, reflection_text=None)
+    await _finalize(cb.message, state, reflection_text=None, telegram_user_id=cb.from_user.id)
 
 
 @router.message(
     CheckinStates.waiting_reflection_text, F.text & ~F.text.startswith("/")
 )
 async def submit_reflection_text(message: Message, state: FSMContext) -> None:
-    await _finalize(message, state, reflection_text=message.text)
+    await _finalize(message, state, reflection_text=message.text, telegram_user_id=message.from_user.id)
 
 
 # --------------------------------------------------------------------------
 # Finalisation
 # --------------------------------------------------------------------------
-async def _finalize(target: Message | None, state: FSMContext, reflection_text: str | None) -> None:
+async def _finalize(
+    target: Message | None,
+    state: FSMContext,
+    reflection_text: str | None,
+    telegram_user_id: int,
+) -> None:
     data = await state.get_data()
     day = data.get("day_score")
     mood = data.get("mood_score")
     energy = data.get("energy_score")
-    await state.clear()
-    if target is None or day is None or mood is None or energy is None:
+    if day is None or mood is None or energy is None:
+        await state.clear()
         return
 
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
-        user = authorize(session, runtime.settings, _author_id(target))
+        user = authorize(session, runtime.settings, telegram_user_id)
         entry = checkin_service.save_daily_entry(
             session,
             user,
@@ -163,23 +170,23 @@ async def _finalize(target: Message | None, state: FSMContext, reflection_text: 
         )
         offer_weekly = weekly_service.should_offer_weekly(session, user)
 
+    # FSM is cleared only after the entry is durably saved; a DB/auth failure
+    # leaves the answers in place instead of silently discarding them.
+    await state.clear()
+    if target is None:
+        return
     await target.edit_text(texts.done_message(entry.day_score, entry.mood_score, entry.energy_score))
     if offer_weekly:
         await target.answer(texts.WEEKLY_OFFER, reply_markup=keyboards.weekly_offer_keyboard())
 
 
-def _author_id(message: Message) -> int:
-    assert message.from_user is not None
-    return message.from_user.id
-
-
 # --------------------------------------------------------------------------
 # /today
 # --------------------------------------------------------------------------
-async def _show_today(message: Message) -> None:
+async def _show_today(message: Message, telegram_user_id: int) -> None:
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
-        user = authorize(session, runtime.settings, message.from_user.id)
+        user = authorize(session, runtime.settings, telegram_user_id)
         entry = checkin_service.get_entry(session, user)
 
     if entry is None:
@@ -192,6 +199,6 @@ async def _show_today(message: Message) -> None:
     )
 
 
-@router.message(F.command == "today")
+@router.message(Command("today"))
 async def cmd_today(message: Message) -> None:
-    await _show_today(message)
+    await _show_today(message, message.from_user.id)

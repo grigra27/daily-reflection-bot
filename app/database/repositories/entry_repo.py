@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import date
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database.models import QUESTIONNAIRE_VERSION, DailyEntry
@@ -25,6 +26,20 @@ class DailyEntryRepository:
         )
         return self._session.execute(stmt).scalar_one_or_none()
 
+    @staticmethod
+    def _assign(
+        entry: DailyEntry,
+        *,
+        day_score: int,
+        mood_score: int,
+        energy_score: int,
+        reflection_text: str | None,
+    ) -> None:
+        entry.day_score = day_score
+        entry.mood_score = mood_score
+        entry.energy_score = energy_score
+        entry.reflection_text = reflection_text
+
     def upsert(
         self,
         *,
@@ -35,23 +50,32 @@ class DailyEntryRepository:
         energy_score: int,
         reflection_text: str | None,
     ) -> DailyEntry:
+        fields = {
+            "day_score": day_score,
+            "mood_score": mood_score,
+            "energy_score": energy_score,
+            "reflection_text": reflection_text,
+        }
         entry = self.get(user_id, entry_date)
-        if entry is None:
+        if entry is not None:
+            self._assign(entry, **fields)
+        else:
             entry = DailyEntry(
                 user_id=user_id,
                 entry_date=entry_date,
-                day_score=day_score,
-                mood_score=mood_score,
-                energy_score=energy_score,
-                reflection_text=reflection_text,
                 questionnaire_version=QUESTIONNAIRE_VERSION,
             )
+            self._assign(entry, **fields)
             self._session.add(entry)
-        else:
-            entry.day_score = day_score
-            entry.mood_score = mood_score
-            entry.energy_score = energy_score
-            entry.reflection_text = reflection_text
+            try:
+                self._session.flush()
+            except IntegrityError:
+                # A concurrent tap won the UNIQUE(user_id, entry_date) race:
+                # discard our INSERT and update the row that actually exists.
+                self._session.rollback()
+                entry = self.get(user_id, entry_date)
+                assert entry is not None
+                self._assign(entry, **fields)
         self._session.commit()
         self._session.refresh(entry)
         return entry
