@@ -23,8 +23,19 @@ KEEP_BACKUPS=20
 
 # --- helpers ---------------------------------------------------------------
 
+# The server's root docker config may hold stale/expired ghcr.io credentials
+# that other apps rely on and that must not be touched. Anonymous pulls run
+# from an isolated empty config instead (the package is public).
+TMP_DOCKER_CONFIG="$(mktemp -d)"
+trap 'rm -rf "$TMP_DOCKER_CONFIG"' EXIT
+printf '{"auths":{}}\n' > "$TMP_DOCKER_CONFIG/config.json"
+
 compose() {
   docker compose --env-file "$DEPLOY_ENV" -f "$COMPOSE_FILE" "$@"
+}
+
+compose_pull() {
+  DOCKER_CONFIG="$TMP_DOCKER_CONFIG" compose pull
 }
 
 read_current_image_ref() {
@@ -106,7 +117,7 @@ verify_running() {
 
 deploy() {
   echo "IMAGE_REF=${IMAGE_REF}" > "$DEPLOY_ENV"
-  compose pull
+  compose_pull
   compose up -d --remove-orphans
   verify_running
 }
@@ -130,7 +141,7 @@ rollback() {
   fi
 
   echo "IMAGE_REF=${PREV_IMAGE_REF}" > "$DEPLOY_ENV"
-  if compose pull && compose up -d --remove-orphans && verify_running; then
+  if compose_pull && compose up -d --remove-orphans && verify_running; then
     echo "rollback success"
   else
     echo "rollback failure"
