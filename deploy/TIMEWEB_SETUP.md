@@ -28,6 +28,8 @@ Target layout (owned by the `deploy` user):
 
 - A Linux VPS (Timeweb Cloud) you can SSH into as root once for setup.
 - Docker Engine and the Docker Compose plugin installed.
+- The `acl` package present (`setfacl` / `getfacl`) — used to share `./data`
+  between the container and the `deploy` user without `chmod 777`.
 - Enough disk for the image, the database and a rolling set of backups.
 
 Root is used **only** for this one-time bootstrap. Day-to-day deployments run
@@ -102,15 +104,42 @@ logs it. Keep it out of git.
 > (four slashes). `/app/data` is bind-mounted to `/opt/daily-reflection-bot/data`,
 > so the database persists across redeploys and container recreation.
 
-## 7. Fix data directory ownership for the container
+## 7. Grant shared access to `./data` (POSIX ACLs)
 
-The image runs as an unprivileged user with UID **10001**. The bind-mounted
-`data/` directory must be writable by it (needed the first time the DB file is
-created):
+Two principals need access to the bind-mounted `data/` directory:
+
+- the **container** (unprivileged image user, UID **10001**) — writes
+  `reflection.db` and its `-wal` / `-shm` sidecar files;
+- the host **`deploy`** user — runs `deploy_remote.sh`, which must *read* the
+  database to take backups and *restore* it during rollback.
+
+A plain `chown` to a single owner can't serve both, and `chmod 777` is not
+acceptable. Use POSIX ACLs instead (provided by the `acl` package, so
+`setfacl`/`getfacl` are available — see §0). The directory stays owned by
+`deploy`; the container's write access comes purely from the ACL.
 
 ```bash
-chown -R 10001:10001 /opt/daily-reflection-bot/data
+# install the tool if missing
+command -v setfacl >/dev/null || apt-get install -y acl   # or: dnf install -y acl
+
+# existing directory: rwx for deploy (owner) and for the container UID, none for others
+setfacl -m u:deploy:rwx,u:10001:rwx /opt/daily-reflection-bot/data
+
+# default ACL: files the container creates inherit rw for both principals,
+# no world access — so backups/restore keep working after redeploys
+setfacl -m d:u:deploy:rw-,d:u:10001:rw-,d:o::--- /opt/daily-reflection-bot/data
+
+# verify
+getfacl /opt/daily-reflection-bot/data
 ```
+
+> Re-running these `setfacl -m` commands is safe (idempotent). `deploy/bootstrap_server.sh`
+> performs exactly this. If files already exist from an earlier run, apply to
+> them once with:
+> `find /opt/daily-reflection-bot/data -exec setfacl -m u:deploy:rw-,u:10001:rw- {} +`
+>
+> ACLs require a filesystem mounted with `acl` support — the default on ext4
+> (standard on Timeweb Cloud). Confirm with `mount | grep ' / ' ` if unsure.
 
 ## 8. Make the GHCR image pullable
 
@@ -145,6 +174,7 @@ Once running, message the bot `/start` in Telegram so it may send check-ins.
 
 - [ ] `deploy` user exists, in `docker` group, key-based SSH works without password.
 - [ ] `/opt/daily-reflection-bot/{data,backups}` exist, owned by `deploy`.
+- [ ] `getfacl data` shows `u:deploy` and `u:10001` access plus a default ACL; no `other::rwx`.
 - [ ] `.env` exists, `chmod 600`, owned by `deploy`, never in git.
 - [ ] `docker compose version` works for the `deploy` user (group membership).
 - [ ] GHCR package is public (or server is logged in) so `pull` succeeds.

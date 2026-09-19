@@ -15,6 +15,7 @@
 #   - verifies Docker + the Compose plugin are available
 #   - adds 'deploy' to the docker group
 #   - creates /opt/daily-reflection-bot with data/ and backups/
+#   - grants shared ./data access via POSIX ACLs (host 'deploy' + container UID)
 #   - prints the remaining MANUAL steps (create .env, GHCR, GitHub secrets)
 
 set -Eeuo pipefail
@@ -22,6 +23,7 @@ set -Eeuo pipefail
 DEPLOY_USER="${DEPLOY_USER:-deploy}"
 DEPLOY_PATH="${DEPLOY_PATH:-/opt/daily-reflection-bot}"
 DEPLOY_PUBKEY="${DEPLOY_PUBKEY:-}"
+APP_UID="${APP_UID:-10001}"   # unprivileged 'appuser' inside the container
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -93,6 +95,33 @@ log "Creating ${DEPLOY_PATH} layout (never deletes existing data)"
 install -d -m 755 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$DEPLOY_PATH"
 install -d -m 750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "${DEPLOY_PATH}/data"
 install -d -m 750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "${DEPLOY_PATH}/backups"
+
+# --- shared ./data access via POSIX ACLs ----------------------------------
+# The bind-mounted ./data is written by the container (UID ${APP_UID}) but must
+# also be readable/restorable by the host 'deploy' user that runs the CI deploy
+# script. Two principals need access; chmod 777 is NOT acceptable, so use ACLs.
+# 'data' stays owned by 'deploy'; the container gets write access purely via ACL.
+log "Checking setfacl (POSIX ACL) availability"
+if ! command -v setfacl >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+setfacl is missing but required for safe shared access to ./data.
+Install the 'acl' package and re-run, e.g.:
+  apt-get install -y acl      # Debian/Ubuntu
+  dnf install -y acl          # RHEL/CentOS/Rocky
+EOF
+  exit 1
+fi
+
+log "Granting host '${DEPLOY_USER}' and container UID '${APP_UID}' access to ${DEPLOY_PATH}/data"
+# Existing directory: traverseable+writable by both, nobody else.
+setfacl -m "u:${DEPLOY_USER}:rwx,u:${APP_UID}:rwx" "${DEPLOY_PATH}/data"
+# Default ACL: files the container creates (reflection.db, -wal, -shm) inherit
+# rw for both principals and no world access.
+setfacl -m "d:u:${DEPLOY_USER}:rw-,d:u:${APP_UID}:rw-,d:o::---" "${DEPLOY_PATH}/data"
+# Apply to any pre-existing content (idempotent; empty on a fresh install).
+find "${DEPLOY_PATH}/data" -mindepth 1 -type d -exec setfacl -m "u:${DEPLOY_USER}:rwx,u:${APP_UID}:rwx" {} + 2>/dev/null || true
+find "${DEPLOY_PATH}/data" -mindepth 1 -type f -exec setfacl -m "u:${DEPLOY_USER}:rw-,u:${APP_UID}:rw-" {} + 2>/dev/null || true
+getfacl -p "${DEPLOY_PATH}/data" 2>/dev/null || true
 
 cat <<EOF
 

@@ -120,6 +120,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Deployment preflight
+        # Fail fast with a clear message if required configuration is missing,
+        # instead of proceeding to scp/ssh. Only presence is tested — secret
+        # values are never printed.
+        env:
+          HOST: ${{ vars.TIMEWEB_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.TIMEWEB_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.TIMEWEB_SSH_KNOWN_HOSTS }}
+        run: |
+          missing=0
+          [ -n "$HOST" ]            || { echo "::error::TIMEWEB_HOST is not set (production environment variable)."; missing=1; }
+          [ -n "$SSH_PRIVATE_KEY" ] || { echo "::error::TIMEWEB_SSH_PRIVATE_KEY is not set (production environment secret)."; missing=1; }
+          [ -n "$SSH_KNOWN_HOSTS" ] || { echo "::error::TIMEWEB_SSH_KNOWN_HOSTS is not set (production environment secret)."; missing=1; }
+          if [ "$missing" -ne 0 ]; then
+            echo "Configure the 'production' environment before deploying — see deploy/GITHUB_SETUP.md."
+            exit 1
+          fi
+          echo "Required deployment configuration is present."
+
       - name: Resolve deploy defaults
         id: cfg
         run: |
