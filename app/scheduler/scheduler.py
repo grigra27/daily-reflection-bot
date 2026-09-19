@@ -1,11 +1,12 @@
-"""Scheduler for daily check-ins and reminders.
+"""Scheduler for morning intentions, daily check-ins and reminders.
 
-Uses a repeating cron trigger **per user** (never a manually-enumerated job per
-calendar day — baseline section 38) evaluated in that user's own timezone. Jobs
-are (re)built from the database on startup, so the schedule automatically
-recovers after a restart. Business decisions (does an entry already exist?) are
-made through the service layer; this module only decides *whether* to hand off
-to the notifier and never computes statistics or writes entries.
+Uses a repeating cron trigger **per user and per job kind** (never a
+manually-enumerated job per calendar day — baseline section 38) evaluated in
+that user's own timezone. Jobs are (re)built from the database on startup, so
+the schedule automatically recovers after a restart. Business decisions (does
+an entry or intent already exist?) are made through the service layer; this
+module only decides *whether* to hand off to the notifier and never computes
+statistics or writes entries.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from app.database.models import User
 from app.database.repositories import UserRepository
 from app.database.session import session_scope
 from app.services.checkin_service import has_entry_today
+from app.services.morning_service import get_intent, has_intent_today
 
 logger = logging.getLogger("app.scheduler")
 
@@ -34,6 +36,18 @@ class ReflectionScheduler:
         self._scheduler = AsyncIOScheduler(timezone="UTC")
 
     # -- job bodies ---------------------------------------------------------
+    async def _morning_job(self, user_pk: int) -> None:
+        with session_scope(self._session_factory) as session:
+            user = session.get(User, user_pk)
+            if user is None or not user.is_active:
+                return
+            already_done = has_intent_today(session, user)
+            chat_id = user.telegram_user_id
+        if already_done:
+            logger.info("Morning prompt skipped for user %s: intent exists today", user_pk)
+            return
+        await notifications.send_morning_prompt(self._bot, chat_id)
+
     async def _daily_job(self, user_pk: int) -> None:
         with session_scope(self._session_factory) as session:
             user = session.get(User, user_pk)
@@ -41,10 +55,11 @@ class ReflectionScheduler:
                 return
             already_done = has_entry_today(session, user)
             chat_id = user.telegram_user_id
+            intent = None if already_done else get_intent(session, user)
         if already_done:
             logger.info("Check-in skipped for user %s: entry exists today", user_pk)
             return
-        await notifications.send_checkin_prompt(self._bot, chat_id)
+        await notifications.send_checkin_prompt(self._bot, chat_id, intent=intent)
 
     async def _reminder_job(self, user_pk: int) -> None:
         with session_scope(self._session_factory) as session:
@@ -74,12 +89,14 @@ class ReflectionScheduler:
         )
 
     def sync_user(self, user: User) -> None:
-        """(Re)register this user's two repeating jobs. Safe to call repeatedly."""
+        """(Re)register this user's three repeating jobs. Safe to call repeatedly."""
+        self._add_job(user, f"morning:{user.id}", self._morning_job, user.morning_time)
         self._add_job(user, f"checkin:{user.id}", self._daily_job, user.checkin_time)
         self._add_job(user, f"reminder:{user.id}", self._reminder_job, user.reminder_time)
         logger.info(
-            "Scheduled user %s: check-in %s, reminder %s (%s)",
+            "Scheduled user %s: morning %s, check-in %s, reminder %s (%s)",
             user.id,
+            user.morning_time,
             user.checkin_time,
             user.reminder_time,
             user.timezone,

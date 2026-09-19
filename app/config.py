@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     database_url: str = Field(alias="DATABASE_URL", default="sqlite:///data/reflection.db")
     default_checkin_time: str = Field(alias="DEFAULT_CHECKIN_TIME", default="21:30")
     default_reminder_time: str = Field(alias="DEFAULT_REMINDER_TIME", default="23:00")
+    default_morning_time: str = Field(alias="DEFAULT_MORNING_TIME", default="08:30")
     log_level: str = Field(alias="LOG_LEVEL", default="INFO")
 
     @field_validator("allowed_telegram_ids_raw")

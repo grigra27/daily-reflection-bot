@@ -16,8 +16,9 @@ from app.bot.deps import AuthorizedFilter, PrivateChatFilter
 from app.bot.states import CheckinStates
 from app.database.session import session_scope
 from app.runtime import get_runtime
-from app.services import checkin_service, weekly_service
+from app.services import checkin_service, morning_service, weekly_service
 from app.services.auth_service import authorize
+from app.services.time_service import user_today
 
 router = Router(name="daily")
 router.message.filter(AuthorizedFilter(), PrivateChatFilter())
@@ -27,26 +28,46 @@ router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
 # --------------------------------------------------------------------------
 # Starting the check-in
 # --------------------------------------------------------------------------
-async def _begin_checkin(message: Message) -> None:
-    await message.answer(texts.CHECKIN_HEADER, reply_markup=keyboards.day_keyboard())
+def _evening_header(session, user) -> str:
+    """First evening question with morning context — one renderer for the
+    scheduled prompt (via notifications.send_checkin_prompt), /checkin, the
+    main menu and editing (all go through ``texts.evening_header_for``)."""
+    return texts.evening_header_for(morning_service.get_intent(session, user))
 
 
-async def _handle_checkin_request(message: Message) -> None:
-    """/checkin and the menu button: if today is already filled, offer view/edit
-    instead of silently restarting (baseline section 14)."""
+async def _handle_checkin_request(
+    message: Message,
+    state: FSMContext,
+    *,
+    telegram_user_id: int,
+    allow_edit: bool = False,
+) -> None:
+    """/checkin, the menu button and inline check-in/edit callbacks: an
+    explicit start clears any stale FSM flow first (saved DB data is never
+    touched); if today is already filled, offer view/edit instead of silently
+    restarting (baseline section 14). ``act:edit`` passes allow_edit — it *is*
+    the edit choice from that menu.
+
+    ``message`` is only the Telegram target to reply into; identity always
+    comes from the caller: ``message.from_user.id`` for messages,
+    ``cb.from_user.id`` for callbacks (a callback's message was authored by the
+    bot, so its ``from_user`` is the bot, never the person tapping the button).
+    """
+    await state.clear()
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
-        user = authorize(session, runtime.settings, message.from_user.id)
+        user = authorize(session, runtime.settings, telegram_user_id)
         already_done = checkin_service.has_entry_today(session, user)
-    if already_done:
+        header = None if already_done and not allow_edit else _evening_header(session, user)
+    if header is None:
         await message.answer(texts.ALREADY_FILLED, reply_markup=keyboards.filled_choice_keyboard())
     else:
-        await _begin_checkin(message)
+        await message.answer(header, reply_markup=keyboards.day_keyboard())
 
 
 @router.message(F.text == keyboards.reply.BTN_CHECKIN)
-async def menu_checkin(message: Message) -> None:
-    await _handle_checkin_request(message)
+async def menu_checkin(message: Message, state: FSMContext) -> None:
+    await _handle_checkin_request(message, state, telegram_user_id=message.from_user.id)
 
 
 @router.message(F.text == keyboards.reply.BTN_TODAY)
@@ -55,16 +76,22 @@ async def menu_today(message: Message) -> None:
 
 
 @router.message(Command("checkin"))
-async def cmd_checkin(message: Message) -> None:
-    await _handle_checkin_request(message)
+async def cmd_checkin(message: Message, state: FSMContext) -> None:
+    await _handle_checkin_request(message, state, telegram_user_id=message.from_user.id)
 
 
 @router.callback_query(F.data == "act:checkin")
 @router.callback_query(F.data == "act:edit")
-async def cb_start_checkin(cb: CallbackQuery) -> None:
+async def cb_start_checkin(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     if cb.message:
-        await _begin_checkin(cb.message)
+        await _handle_checkin_request(
+            cb.message,
+            state,
+            # Identity from cb.from_user: cb.message is bot-authored.
+            telegram_user_id=cb.from_user.id,
+            allow_edit=cb.data == "act:edit",
+        )
 
 
 @router.callback_query(F.data == "act:today")
@@ -196,21 +223,28 @@ async def _finalize(
 
 
 # --------------------------------------------------------------------------
-# /today
+# /today — unified morning + evening snapshot
 # --------------------------------------------------------------------------
 async def _show_today(message: Message, telegram_user_id: int) -> None:
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
         user = authorize(session, runtime.settings, telegram_user_id)
         entry = checkin_service.get_entry(session, user)
+        intent = morning_service.get_intent(session, user)
 
-    if entry is None:
-        await message.answer(texts.NO_ENTRY_TODAY, reply_markup=keyboards.today_fill_keyboard())
-        return
     await message.answer(
-        texts.today_message(entry.entry_date, entry.day_score, entry.mood_score,
-                             entry.energy_score, entry.reflection_text),
-        reply_markup=keyboards.today_edit_keyboard(),
+        texts.today_message(
+            user_today(user.timezone),
+            entry.day_score if entry else None,
+            entry.mood_score if entry else None,
+            entry.energy_score if entry else None,
+            entry.reflection_text if entry else None,
+            morning_main=intent.main_intention if intent else None,
+            morning_secondary=intent.secondary_intention if intent else None,
+        ),
+        reply_markup=keyboards.today_actions_keyboard(
+            has_morning=intent is not None, has_evening=entry is not None
+        ),
     )
 
 

@@ -58,15 +58,30 @@ def skip_keyboard(callback_prefix: str) -> InlineKeyboardMarkup:
     )
 
 
-def today_edit_keyboard() -> InlineKeyboardMarkup:
+def today_actions_keyboard(*, has_morning: bool, has_evening: bool) -> InlineKeyboardMarkup:
+    """Contextual /today actions — morning and evening, current date only."""
+    morning = (
+        InlineKeyboardButton(text="✏️ Изменить утро", callback_data="mrn:edit")
+        if has_morning
+        else InlineKeyboardButton(text="☀️ Записать утро", callback_data="mrn:start")
+    )
+    evening = (
+        InlineKeyboardButton(text="✏️ Изменить итог", callback_data="act:edit")
+        if has_evening
+        else InlineKeyboardButton(text="🌙 Заполнить итог", callback_data="act:checkin")
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[morning, evening]])
+
+
+def morning_prompt_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="✏️ Изменить", callback_data="act:edit")]]
+        inline_keyboard=[[InlineKeyboardButton(text="🎯 Записать", callback_data="mrn:start")]]
     )
 
 
-def today_fill_keyboard() -> InlineKeyboardMarkup:
+def morning_edit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="📝 Заполнить сейчас", callback_data="act:checkin")]]
+        inline_keyboard=[[InlineKeyboardButton(text="✏️ Изменить", callback_data="mrn:edit")]]
     )
 
 
@@ -127,9 +142,12 @@ def settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🕘 Время вопроса", callback_data="se:checkin"),
-                InlineKeyboardButton(text="🔔 Напоминание", callback_data="se:reminder"),
+                InlineKeyboardButton(text="☀️ Утренний фокус", callback_data="se:morning"),
+                InlineKeyboardButton(text="🌙 Время вопроса", callback_data="se:checkin"),
             ],
-            [InlineKeyboardButton(text="🌍 Часовой пояс", callback_data="se:tz")],
+            [
+                InlineKeyboardButton(text="🔔 Напоминание", callback_data="se:reminder"),
+                InlineKeyboardButton(text="🌍 Часовой пояс", callback_data="se:tz"),
+            ],
         ]
     )

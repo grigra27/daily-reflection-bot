@@ -23,8 +23,9 @@ logger = logging.getLogger("app.main")
 
 COMMANDS = [
     BotCommand(command="start", description="Начать"),
-    BotCommand(command="checkin", description="Заполнить сегодня"),
-    BotCommand(command="today", description="Сегодняшняя запись"),
+    BotCommand(command="morning", description="Фокус дня"),
+    BotCommand(command="checkin", description="Итоги дня"),
+    BotCommand(command="today", description="Сегодняшний снимок"),
     BotCommand(command="stats", description="Статистика"),
     BotCommand(command="export", description="Экспорт CSV"),
     BotCommand(command="settings", description="Настройки"),

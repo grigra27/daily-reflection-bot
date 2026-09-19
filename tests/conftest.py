@@ -27,6 +27,7 @@ def settings() -> Settings:
         default_timezone="Europe/Moscow",
         default_checkin_time="21:30",
         default_reminder_time="23:00",
+        default_morning_time="08:30",
         database_url="sqlite:///unused",
     )
 
