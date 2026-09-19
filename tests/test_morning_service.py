@@ -83,6 +83,23 @@ def test_partial_upsert_keeps_untouched_field(session: Session, user: User) -> N
     assert cleared.secondary_intention is None
 
 
+def test_literal_sentinel_text_is_stored_as_data(session: Session, user: User) -> None:
+    # The "keep this field" marker is a private object, so a user who really
+    # types the old magic string gets it stored instead of silently ignored.
+    repo = MorningIntentRepository(session)
+    repo.upsert(
+        user_id=user.id,
+        intention_date=date(2026, 9, 19),
+        main_intention="A",
+        secondary_intention="S",
+    )
+    updated = repo.upsert(
+        user_id=user.id, intention_date=date(2026, 9, 19), main_intention="unchanged"
+    )
+    assert updated.main_intention == "unchanged"
+    assert updated.secondary_intention == "S"
+
+
 def test_upsert_survives_concurrent_insert(session: Session, user: User, monkeypatch) -> None:
     # Double-tap race: INSERT hits UNIQUE(user_id, intention_date); the repo
     # must roll back and update the row that actually exists.

@@ -36,17 +36,27 @@ def _evening_header(session, user) -> str:
 
 
 async def _handle_checkin_request(
-    message: Message, state: FSMContext, *, allow_edit: bool = False
+    message: Message,
+    state: FSMContext,
+    *,
+    telegram_user_id: int,
+    allow_edit: bool = False,
 ) -> None:
     """/checkin, the menu button and inline check-in/edit callbacks: an
     explicit start clears any stale FSM flow first (saved DB data is never
     touched); if today is already filled, offer view/edit instead of silently
     restarting (baseline section 14). ``act:edit`` passes allow_edit — it *is*
-    the edit choice from that menu."""
+    the edit choice from that menu.
+
+    ``message`` is only the Telegram target to reply into; identity always
+    comes from the caller: ``message.from_user.id`` for messages,
+    ``cb.from_user.id`` for callbacks (a callback's message was authored by the
+    bot, so its ``from_user`` is the bot, never the person tapping the button).
+    """
     await state.clear()
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
-        user = authorize(session, runtime.settings, message.from_user.id)
+        user = authorize(session, runtime.settings, telegram_user_id)
         already_done = checkin_service.has_entry_today(session, user)
         header = None if already_done and not allow_edit else _evening_header(session, user)
     if header is None:
@@ -57,7 +67,7 @@ async def _handle_checkin_request(
 
 @router.message(F.text == keyboards.reply.BTN_CHECKIN)
 async def menu_checkin(message: Message, state: FSMContext) -> None:
-    await _handle_checkin_request(message, state)
+    await _handle_checkin_request(message, state, telegram_user_id=message.from_user.id)
 
 
 @router.message(F.text == keyboards.reply.BTN_TODAY)
@@ -67,7 +77,7 @@ async def menu_today(message: Message) -> None:
 
 @router.message(Command("checkin"))
 async def cmd_checkin(message: Message, state: FSMContext) -> None:
-    await _handle_checkin_request(message, state)
+    await _handle_checkin_request(message, state, telegram_user_id=message.from_user.id)
 
 
 @router.callback_query(F.data == "act:checkin")
@@ -76,7 +86,11 @@ async def cb_start_checkin(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     if cb.message:
         await _handle_checkin_request(
-            cb.message, state, allow_edit=cb.data == "act:edit"
+            cb.message,
+            state,
+            # Identity from cb.from_user: cb.message is bot-authored.
+            telegram_user_id=cb.from_user.id,
+            allow_edit=cb.data == "act:edit",
         )
 
 
