@@ -65,6 +65,9 @@ class FakeMessage:
         self.answers.append(text)
 
     async def edit_text(self, text: str, reply_markup=None, **kwargs) -> None:
+        # Telegram forbids editing messages authored by the user; treat any
+        # such attempt in handlers as a test failure.
+        assert self.from_user.id == BOT_TG_ID, "bot tried to edit a user-authored message"
         self.edits.append(text)
 
 
@@ -220,6 +223,22 @@ async def test_daily_skip_after_text_step_saves(app_runtime, session_factory) ->
         user = UserRepository(s).get_by_telegram_id(111)
         entry = s.query(DailyEntry).filter_by(user_id=user.id).one()
         assert entry.reflection_text is None
+
+
+async def test_text_flow_replies_done_as_new_message_never_edits_user_text(
+    app_runtime, session_factory
+) -> None:
+    # Regression: _finalize must not edit_text() the user's own message —
+    # Telegram forbids it. The ✅ Готово confirmation goes out as a new message.
+    state = FakeState()
+    await _run_score_steps(state)
+    await daily.ask_reflection_text(callback("ci:ref:yes", message=bot_message()), state)
+    user_msg = user_message(111, "Мысли вслух")
+    await daily.submit_reflection_text(user_msg, state)
+
+    assert user_msg.edits == []  # user-authored FakeMessage was not edited
+    assert texts.done_message(4, 3, 2) in user_msg.answers
+    assert state.cleared == 1
 
 
 async def test_finalize_keeps_fsm_state_when_save_fails(app_runtime) -> None:

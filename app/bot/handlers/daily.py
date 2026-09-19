@@ -112,7 +112,9 @@ async def skip_reflection(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     # Identity comes from cb.from_user: cb.message was sent by the bot, so its
     # from_user is the bot itself, never the person tapping the button.
-    await _finalize(cb.message, state, reflection_text=None, telegram_user_id=cb.from_user.id)
+    await _finalize(
+        cb.message, state, reflection_text=None, telegram_user_id=cb.from_user.id, edit_target=True
+    )
 
 
 @router.callback_query(CheckinStates.ask_reflection, F.data == "ci:ref:yes")
@@ -130,14 +132,19 @@ async def ask_reflection_text(cb: CallbackQuery, state: FSMContext) -> None:
 )
 async def skip_reflection_text(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
-    await _finalize(cb.message, state, reflection_text=None, telegram_user_id=cb.from_user.id)
+    await _finalize(
+        cb.message, state, reflection_text=None, telegram_user_id=cb.from_user.id, edit_target=True
+    )
 
 
 @router.message(
     CheckinStates.waiting_reflection_text, F.text & ~F.text.startswith("/")
 )
 async def submit_reflection_text(message: Message, state: FSMContext) -> None:
-    await _finalize(message, state, reflection_text=message.text, telegram_user_id=message.from_user.id)
+    await _finalize(
+        message, state, reflection_text=message.text, telegram_user_id=message.from_user.id,
+        edit_target=False,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -148,6 +155,7 @@ async def _finalize(
     state: FSMContext,
     reflection_text: str | None,
     telegram_user_id: int,
+    edit_target: bool,
 ) -> None:
     data = await state.get_data()
     day = data.get("day_score")
@@ -175,7 +183,14 @@ async def _finalize(
     await state.clear()
     if target is None:
         return
-    await target.edit_text(texts.done_message(entry.day_score, entry.mood_score, entry.energy_score))
+    done = texts.done_message(entry.day_score, entry.mood_score, entry.energy_score)
+    if edit_target:
+        # Callback flow: the target is the bot's own message and can be edited.
+        await target.edit_text(done)
+    else:
+        # Text flow: the target is the user's message — the Telegram API
+        # cannot edit it, so the confirmation goes out as a new message.
+        await target.answer(done)
     if offer_weekly:
         await target.answer(texts.WEEKLY_OFFER, reply_markup=keyboards.weekly_offer_keyboard())
 
