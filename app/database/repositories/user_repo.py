@@ -28,6 +28,7 @@ class UserRepository:
         timezone: str = "Europe/Moscow",
         checkin_time: str = "21:30",
         reminder_time: str = "23:00",
+        morning_time: str = "08:30",
     ) -> User:
         user = self.get_by_telegram_id(telegram_user_id)
         if user is not None:
@@ -40,6 +41,7 @@ class UserRepository:
             timezone=timezone,
             checkin_time=checkin_time,
             reminder_time=reminder_time,
+            morning_time=morning_time,
         )
         self._session.add(user)
         self._session.commit()

@@ -34,6 +34,7 @@ def authorize(
         timezone=settings.default_timezone,
         checkin_time=settings.default_checkin_time,
         reminder_time=settings.default_reminder_time,
+        morning_time=settings.default_morning_time,
     )
     if not user.is_active:
         raise NotAuthorizedError(str(telegram_user_id))

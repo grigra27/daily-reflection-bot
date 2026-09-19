@@ -158,13 +158,17 @@ async def test_start_creates_user_and_registers_scheduler_jobs(app_runtime, sess
             pk = user.id
 
         jobs = [j.id for j in app_runtime.scheduler.apscheduler.get_jobs()]
-        assert sorted(jobs) == sorted([f"checkin:{pk}", f"reminder:{pk}"])
+        assert sorted(jobs) == sorted(
+            [f"morning:{pk}", f"checkin:{pk}", f"reminder:{pk}"]
+        )
         assert texts.START in msg.answers  # welcome comes after onboarding
 
         # Repeated /start is idempotent: no second user, no extra jobs.
         await start.cmd_start(user_message(111, "/start"), FakeState())
         jobs2 = [j.id for j in app_runtime.scheduler.apscheduler.get_jobs()]
-        assert sorted(jobs2) == sorted([f"checkin:{pk}", f"reminder:{pk}"])
+        assert sorted(jobs2) == sorted(
+            [f"morning:{pk}", f"checkin:{pk}", f"reminder:{pk}"]
+        )
         with session_scope(session_factory) as s:
             assert len(UserRepository(s).list_all()) == 1
     finally:
@@ -268,12 +272,14 @@ async def test_today_command_filter_matches_only_slash_command() -> None:
     assert not await f(message=tg_msg(BTN_TODAY), bot=None)  # type: ignore[arg-type]
 
 
-async def test_today_shows_no_entry_then_saved_entry_with_escaped_text(
+async def test_today_shows_empty_snapshot_then_saved_entry_with_escaped_text(
     app_runtime, session_factory
 ) -> None:
     msg = user_message(111, "/today")
     await daily.cmd_today(msg)
-    assert texts.NO_ENTRY_TODAY in msg.answers
+    # Unified v1.1 snapshot: both neutral empty states, no error.
+    assert texts.MORNING_RECORDED_EMPTY in msg.answers[-1]
+    assert texts.EVENING_MISSING in msg.answers[-1]
 
     # Fill via the full flow (skip button), then re-check.
     state = FakeState()

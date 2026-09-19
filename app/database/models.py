@@ -41,6 +41,7 @@ class User(Base):
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow", nullable=False)
     checkin_time: Mapped[str] = mapped_column(String(5), default="21:30", nullable=False)
     reminder_time: Mapped[str] = mapped_column(String(5), default="23:00", nullable=False)
+    morning_time: Mapped[str] = mapped_column(String(5), default="08:30", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -52,6 +53,37 @@ class User(Base):
     weekly_reflections: Mapped[list[WeeklyReflection]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    morning_intents: Mapped[list[MorningIntent]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class MorningIntent(Base):
+    """One morning intention per user per local date.
+
+    Deliberately has no FK to ``daily_entries`` — the link to the evening
+    check-in is purely logical (same user, same user-local calendar date),
+    and either record may exist without the other.
+    """
+
+    __tablename__ = "morning_intents"
+    __table_args__ = (
+        UniqueConstraint("user_id", "intention_date", name="uq_morning_intent_user_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    intention_date: Mapped[date] = mapped_column(Date, nullable=False)
+    main_intention: Mapped[str] = mapped_column(Text, nullable=False)
+    secondary_intention: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="morning_intents")
 
 
 class DailyEntry(Base):

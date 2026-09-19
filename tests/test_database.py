@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.database.models import DailyEntry, User
+from app.database.models import DailyEntry, MorningIntent, User
 from app.database.repositories import DailyEntryRepository, UserRepository
 
 
@@ -125,3 +126,45 @@ def test_score_check_constraint(session: Session, user: User) -> None:
     with pytest.raises(IntegrityError):
         session.commit()
     session.rollback()
+
+
+# --------------------------------------------------------------------------
+# v1.1 MorningIntent schema
+# --------------------------------------------------------------------------
+def test_user_morning_time_default_and_not_null(session: Session, user: User) -> None:
+    # ORM-created users always get the default.
+    assert user.morning_time == "08:30"
+    # The column itself is NOT NULL (checked at the DB level, bypassing the
+    # ORM default — SQLAlchemy cannot distinguish an explicit None here).
+    morning_time_col = User.__table__.columns["morning_time"]
+    assert morning_time_col.nullable is False
+
+    with pytest.raises(IntegrityError):
+        session.execute(
+            text(
+                "INSERT INTO users (telegram_user_id, timezone, checkin_time, "
+                "reminder_time, morning_time, is_active, created_at, updated_at) "
+                "VALUES (998, 'UTC', '21:30', '23:00', NULL, 1, "
+                "'2026-09-19 08:00:00', '2026-09-19 08:00:00')"
+            )
+        )
+    session.rollback()
+
+
+def test_morning_intent_main_required(session: Session, user: User) -> None:
+    session.add(
+        MorningIntent(user_id=user.id, intention_date=date(2026, 9, 19), main_intention=None)
+    )
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+
+def test_morning_and_evening_rows_are_independent(session: Session, user: User) -> None:
+    """The link between MorningIntent and DailyEntry is logical, not an FK:
+    either record must be able to exist without the other."""
+    session.add(MorningIntent(user_id=user.id, intention_date=date(2026, 9, 19), main_intention="solo"))
+    session.commit()
+    # morning with no evening for that date — fine
+    assert session.query(MorningIntent).one().intention_date == date(2026, 9, 19)
+    assert session.query(DailyEntry).count() == 0

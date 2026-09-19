@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from aiogram import Router
 
-from app.bot.handlers import daily, export, settings, start, stats, weekly
+from app.bot.handlers import daily, export, morning, settings, start, stats, weekly
 
 
 def build_root_router() -> Router:
     root = Router(name="root")
     root.include_router(start.router)
+    root.include_router(morning.router)
     root.include_router(daily.router)
     root.include_router(stats.router)
     root.include_router(export.router)

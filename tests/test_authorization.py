@@ -15,6 +15,18 @@ def test_allowed_user_authorized(session: Session, settings: Settings) -> None:
     assert u.id is not None
 
 
+def test_new_user_receives_all_four_schedule_settings(
+    session: Session, settings: Settings
+) -> None:
+    # v1.1: authorize() must seed timezone, morning_time, checkin_time and
+    # reminder_time from settings, not just the v1 three.
+    u = authorize(session, settings, 111)
+    assert u.timezone == settings.default_timezone
+    assert u.morning_time == settings.default_morning_time == "08:30"
+    assert u.checkin_time == settings.default_checkin_time
+    assert u.reminder_time == settings.default_reminder_time
+
+
 def test_unknown_user_rejected(session: Session, settings: Settings) -> None:
     with pytest.raises(NotAuthorizedError):
         authorize(session, settings, 999)

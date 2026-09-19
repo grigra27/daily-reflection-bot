@@ -34,7 +34,9 @@ async def _render_settings(message: Message) -> None:
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
         user = authorize(session, runtime.settings, message.from_user.id)
-        text = texts.settings_message(user.checkin_time, user.reminder_time, user.timezone)
+        text = texts.settings_message(
+            user.morning_time, user.checkin_time, user.reminder_time, user.timezone
+        )
     await message.answer(text, reply_markup=keyboards.settings_keyboard())
 
 
@@ -43,6 +45,13 @@ async def _render_settings(message: Message) -> None:
 async def cmd_settings(message: Message, state: FSMContext) -> None:
     await state.clear()
     await _render_settings(message)
+
+
+@router.callback_query(F.data == "se:morning")
+async def ask_morning(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await state.set_state(SettingsStates.waiting_morning_time)
+    await cb.message.answer(texts.ASK_MORNING_TIME)  # type: ignore[union-attr]
 
 
 @router.callback_query(F.data == "se:checkin")
@@ -88,6 +97,11 @@ async def _apply_entry(
     if runtime.scheduler is not None:
         runtime.scheduler.reschedule_user(user_pk)
     await _render_settings(message)
+
+
+@router.message(SettingsStates.waiting_morning_time, F.text)
+async def set_morning(message: Message, state: FSMContext) -> None:
+    await _apply_entry(message, state, settings_service.set_morning_time, texts.INVALID_TIME)
 
 
 @router.message(SettingsStates.waiting_checkin_time, F.text)

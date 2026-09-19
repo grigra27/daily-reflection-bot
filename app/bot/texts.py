@@ -10,6 +10,8 @@ from __future__ import annotations
 import html
 from datetime import date
 
+from app.database.models import MorningIntent
+
 _MONTHS_RU = [
     "января", "февраля", "марта", "апреля", "мая", "июня",
     "июля", "августа", "сентября", "октября", "ноября", "декабря",
@@ -28,20 +30,61 @@ GENERAL_ERROR = "Что-то пошло не так. Попробуй ещё р�
 
 START = (
     "👋 Добро пожаловать.\n\n"
-    "Я буду раз в день помогать тебе коротко фиксировать, каким был твой день."
+    "Утром зафиксируем главный фокус дня, вечером — коротко подведём итог."
 )
 
 HELP = (
     "<b>Что умеет бот</b>\n\n"
+    "/morning — записать или изменить фокус дня\n"
     "/checkin — заполнить сегодняшний итог\n"
-    "/today — посмотреть сегодняшнюю запись\n"
+    "/today — посмотреть сегодняшний снимок\n"
     "/stats — статистика\n"
     "/export — выгрузить данные\n"
     "/settings — настройки"
 )
 
+# --- Morning intention flow (v1.1) -------------------------------------------
+MORNING_PROMPT = "☀️ <b>Доброе утро</b>\n\nЗафиксируем главный фокус дня?"
+Q_MAIN_INTENTION = (
+    "🎯 <b>Главное сегодня:</b>\n\nНапиши одно основное дело или фокус дня."
+)
+Q_SECONDARY_INTENTION = (
+    "○ <b>Ещё хочу успеть:</b>\n\nМожно написать 1–2 дополнительных намерения."
+)
+MORNING_EMPTY_TODAY = "☀️ <b>Фокус на сегодня</b>"
+MORNING_RECORDED_EMPTY = "☀️ Утренний фокус не записан."
+INTENTION_TOO_LONG = "Слишком длинно. Напиши короче — максимум 1000 символов."
+INTENTION_EMPTY = "Напиши хотя бы одно главное дело или фокус дня."
+
+
+def intention_lines(main: str | None, secondary: str | None) -> list[str]:
+    """Shared morning block renderer — one implementation for /morning, the
+    evening header, /today and the completion message. User text is escaped
+    because messages are sent with ParseMode.HTML; an absent secondary
+    intention simply omits its line."""
+    lines = []
+    if main is not None:
+        lines.append(f"🎯 Главное: {html.escape(main)}")
+    if secondary:
+        lines.append(f"○ Ещё: {html.escape(secondary)}")
+    return lines
+
+
+def morning_record_message(main: str | None, secondary: str | None) -> str:
+    return "\n".join([MORNING_EMPTY_TODAY, "", *intention_lines(main, secondary)])
+
+
+MORNING_DONE_HEADER = "✅ <b>Фокус дня сохранён</b>"
+
+
+def morning_done_message(main: str, secondary: str | None) -> str:
+    return "\n".join([MORNING_DONE_HEADER, "", *intention_lines(main, secondary)])
+
+
 # --- Daily check-in flow -----------------------------------------------------
 CHECKIN_HEADER = "🌙 <b>Итоги дня</b>\n\nКак в целом прошёл твой день?"
+CHECKIN_SECTION = "🌙 <b>Итоги дня</b>"
+EVENING_MISSING = "🌙 Итог дня пока не заполнен."
 Q_DAY = "<b>Как в целом прошёл твой день?</b>"
 Q_MOOD = "<b>Как ты себя эмоционально чувствовал большую часть дня?</b>"
 Q_ENERGY = "<b>Сколько у тебя сегодня было энергии?</b>"
@@ -52,7 +95,34 @@ Q_REFLECTION_TEXT = (
 )
 
 ALREADY_FILLED = "Ты уже заполнял сегодняшний итог."
-NO_ENTRY_TODAY = "Сегодняшней записи пока нет."
+
+
+def evening_header(main_intention: str | None = None, secondary_intention: str | None = None) -> str:
+    """Opening message of the evening flow — shared by the scheduled prompt,
+    /checkin, the main menu and editing. With a morning intent it echoes the
+    intention back; without one it stays exactly the neutral v1 header (no
+    negative reminder about not having written anything)."""
+    if main_intention is None:
+        return CHECKIN_HEADER
+    return "\n".join(
+        [
+            CHECKIN_SECTION,
+            "",
+            "Утром ты планировал:",
+            "",
+            *intention_lines(main_intention, secondary_intention),
+            "",
+            "Как в целом прошёл твой день?",
+        ]
+    )
+
+
+def evening_header_for(intent: MorningIntent | None) -> str:
+    """Opening message of the evening flow. One implementation shared by the
+    scheduled prompt (notifications), /checkin, the main menu and editing."""
+    if intent is None:
+        return CHECKIN_HEADER
+    return evening_header(intent.main_intention, intent.secondary_intention)
 
 
 def done_message(day: int, mood: int, energy: int) -> str:
@@ -69,10 +139,27 @@ def ru_date(day: date) -> str:
     return f"{day.day} {_MONTHS_RU[day.month - 1]} {day.year}"
 
 
-def today_message(entry_day: date, day: int, mood: int, energy: int, reflection: str | None) -> str:
-    lines = [
-        f"📅 <b>{ru_date(entry_day)}</b>",
-        "",
+def today_message(
+    entry_day: date,
+    day: int | None,
+    mood: int | None,
+    energy: int | None,
+    reflection: str | None,
+    morning_main: str | None = None,
+    morning_secondary: str | None = None,
+) -> str:
+    """Unified daily snapshot: morning block + evening block, each with a
+    neutral empty state. Supports all four combinations."""
+    lines = [f"📅 <b>{ru_date(entry_day)}</b>", "", "☀️ <b>Утро</b>", ""]
+    if morning_main is not None:
+        lines += intention_lines(morning_main, morning_secondary)
+    else:
+        lines.append(MORNING_RECORDED_EMPTY)
+    lines += ["", "🌙 <b>Итоги</b>", ""]
+    if day is None or mood is None or energy is None:
+        lines.append(EVENING_MISSING)
+        return "\n".join(lines)
+    lines += [
         f"День: {DAY_EMOJI[day]} {day}/5",
         f"Настроение: {MOOD_EMOJI[mood]} {mood}/5",
         f"Энергия: {ENERGY_EMOJI[energy]} {energy}/5",
@@ -104,15 +191,19 @@ def stats_title(period_days: int) -> str:
 
 
 # --- Settings ----------------------------------------------------------------
-def settings_message(checkin_time: str, reminder_time: str, tz: str) -> str:
+def settings_message(morning_time: str, checkin_time: str, reminder_time: str, tz: str) -> str:
     return (
         "⚙️ <b>Настройки</b>\n\n"
-        f"Ежедневный вопрос: {checkin_time}\n"
-        f"Повторное напоминание: {reminder_time}\n"
-        f"Часовой пояс: {tz}"
+        f"☀️ Утренний фокус: {morning_time}\n"
+        f"🌙 Итоги дня: {checkin_time}\n"
+        f"🔔 Повторное напоминание: {reminder_time}\n"
+        f"🌍 Часовой пояс: {tz}"
     )
 
 
+ASK_MORNING_TIME = (
+    "Во сколько утром напоминать про фокус дня? Отправь время в формате ЧЧ:ММ (например, 08:30)."
+)
 ASK_CHECKIN_TIME = "Во сколько задавать ежедневный вопрос? Отправь время в формате ЧЧ:ММ (например, 21:30)."
 ASK_REMINDER_TIME = "Во сколько присылать повторное напоминание? Формат ЧЧ:ММ (например, 23:00)."
 ASK_TIMEZONE = (

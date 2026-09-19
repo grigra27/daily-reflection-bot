@@ -25,6 +25,14 @@ def set_timezone(session: Session, user: User, tz_name: str) -> User:
     return UserRepository(session).save(user)
 
 
+def set_morning_time(session: Session, user: User, value: str) -> User:
+    try:
+        user.morning_time = format_hhmm(value)
+    except ValueError as exc:
+        raise InvalidSettingError(str(exc)) from exc
+    return UserRepository(session).save(user)
+
+
 def set_checkin_time(session: Session, user: User, value: str) -> User:
     try:
         user.checkin_time = format_hhmm(value)

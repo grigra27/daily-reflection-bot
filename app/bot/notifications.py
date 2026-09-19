@@ -13,13 +13,33 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
 from app.bot import keyboards, texts
+from app.database.models import MorningIntent
 
 logger = logging.getLogger("app.notifications")
 
 
-async def send_checkin_prompt(bot: Bot, chat_id: int) -> None:
+async def send_morning_prompt(bot: Bot, chat_id: int) -> None:
+    """Sunrise prompt only — the FSM starts when the user taps the button,
+    never from this notification. There is deliberately no morning reminder.
+    """
     try:
-        await bot.send_message(chat_id, texts.CHECKIN_HEADER, reply_markup=keyboards.day_keyboard())
+        await bot.send_message(
+            chat_id, texts.MORNING_PROMPT, reply_markup=keyboards.morning_prompt_keyboard()
+        )
+        logger.info("Sent morning prompt to chat %s", chat_id)
+    except TelegramAPIError:
+        logger.exception("Failed to send morning prompt to chat %s", chat_id)
+
+
+async def send_checkin_prompt(
+    bot: Bot, chat_id: int, *, intent: MorningIntent | None = None
+) -> None:
+    try:
+        await bot.send_message(
+            chat_id,
+            texts.evening_header_for(intent),
+            reply_markup=keyboards.day_keyboard(),
+        )
         logger.info("Sent daily check-in prompt to chat %s", chat_id)
     except TelegramAPIError:
         logger.exception("Failed to send check-in prompt to chat %s", chat_id)
