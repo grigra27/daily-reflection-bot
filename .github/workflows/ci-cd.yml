@@ -1,0 +1,172 @@
+name: CI/CD
+
+# Production deployment:
+#   push to main -> test -> build image -> deploy over SSH
+# Pull requests only run the test job; nothing is published or deployed.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/grigra27/daily-reflection-bot
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install project + dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Verify application imports
+        # Importing app.main has no side effects (main() only runs under __main__).
+        run: python -c "import app.main, app.runtime, app.config, app.database.models"
+
+      - name: Run test suite
+        # Tests use a throwaway SQLite DB and never contact Telegram/network.
+        run: python -m pytest
+
+      - name: Verify Alembic migration applies to a temporary SQLite database
+        run: |
+          python -m alembic upgrade head
+          test -f "$DATABASE_FILE"
+        env:
+          DATABASE_URL: sqlite:////tmp/ci_reflection.db
+          DATABASE_FILE: /tmp/ci_reflection.db
+
+  build:
+    name: Build and publish image
+    needs: test
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_ref: ${{ steps.image_ref.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (tags + OCI labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long,prefix=sha-
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and push to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Compute immutable image reference for deploy
+        id: image_ref
+        run: echo "image_ref=${IMAGE_NAME}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to production
+    needs: build
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    concurrency:
+      group: daily-reflection-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      IMAGE_REF: ${{ needs.build.outputs.image_ref }}
+      TIMEWEB_HOST: ${{ vars.TIMEWEB_HOST }}
+      TIMEWEB_SSH_USER: ${{ vars.TIMEWEB_SSH_USER }}
+      TIMEWEB_SSH_PORT: ${{ vars.TIMEWEB_SSH_PORT }}
+      TIMEWEB_DEPLOY_PATH: ${{ vars.TIMEWEB_DEPLOY_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve deploy defaults
+        id: cfg
+        run: |
+          echo "ssh_user=${TIMEWEB_SSH_USER:-deploy}" >> "$GITHUB_OUTPUT"
+          echo "ssh_port=${TIMEWEB_SSH_PORT:-22}" >> "$GITHUB_OUTPUT"
+          echo "deploy_path=${TIMEWEB_DEPLOY_PATH:-/opt/daily-reflection-bot}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare SSH credentials
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.TIMEWEB_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.TIMEWEB_SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          echo "SSH_TARGET=${{ steps.cfg.outputs.ssh_user }}@${TIMEWEB_HOST}" >> "$GITHUB_ENV"
+          echo "SSH_PORT=${{ steps.cfg.outputs.ssh_port }}" >> "$GITHUB_ENV"
+          echo "DEPLOY_PATH=${{ steps.cfg.outputs.deploy_path }}" >> "$GITHUB_ENV"
+
+      - name: Upload deployment files
+        run: |
+          scp -i "$HOME/.ssh/deploy_key" \
+              -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+              -o StrictHostKeyChecking=yes \
+              -P "$SSH_PORT" \
+              deploy/docker-compose.prod.yml deploy/deploy_remote.sh \
+              "${SSH_TARGET}:${DEPLOY_PATH}/"
+
+      - name: Run remote deployment
+        run: |
+          ssh -i "$HOME/.ssh/deploy_key" \
+              -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+              -o StrictHostKeyChecking=yes \
+              -p "$SSH_PORT" \
+              "$SSH_TARGET" \
+              "bash ${DEPLOY_PATH}/deploy_remote.sh '${IMAGE_REF}'"
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          {
+            echo "## Deployment"
+            echo ""
+            echo "- environment: production"
+            echo "- commit: \`${GITHUB_SHA}\`"
+            echo "- image: \`${IMAGE_REF}\`"
+            echo "- result: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

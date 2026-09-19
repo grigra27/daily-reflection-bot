@@ -1,0 +1,17 @@
+# Production Compose — runs the pre-built image from GHCR (never builds source).
+#
+# IMAGE_REF is interpolated from deploy.env (written by the CI/CD pipeline).
+# Application secrets come from the server-side .env via env_file.
+#
+# Usage on the server (normally driven by deploy_remote.sh):
+#   docker compose --env-file deploy.env -f docker-compose.prod.yml up -d --remove-orphans
+services:
+  bot:
+    image: ${IMAGE_REF:?IMAGE_REF must be set in deploy.env}
+    container_name: daily-reflection-bot
+    env_file:
+      - .env
+    volumes:
+      # Persist SQLite on the host so it survives container removal/recreation.
+      - ./data:/app/data
+    restart: unless-stopped

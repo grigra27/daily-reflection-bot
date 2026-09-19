@@ -298,6 +298,58 @@ energy_drainer, want_more, created_at, updated_at`;
 
 ---
 
+## Production deployment (CI/CD)
+
+Релизы разворачиваются автоматически через GitHub Actions
+(`.github/workflows/ci-cd.yml`) на VPS (Timeweb). Архитектура:
+
+```text
+push / PR → GitHub Actions → тесты
+                                ↓ (только push в main)
+                        build Docker-образа
+                                ↓
+                          GHCR (ghcr.io/grigra27/daily-reflection-bot)
+                                ↓ SSH
+                          Timeweb VPS
+                                ↓
+              backup SQLite → compose pull → compose up -d → verify
+                                ↓ (при сбое старта)
+                             авто-rollback
+```
+
+Ключевые свойства:
+
+- сервер **не собирает** приложение и не делает `git pull` — получает только
+  готовый образ под неизменяемым тегом `sha-<commit>` (деплой никогда не
+  использует `latest`);
+- тесты обязаны пройти, иначе образ не публикуется и production не меняется;
+  pull request ничего не деплоит;
+- перед заменой версии создаётся корректный SQLite-бэкап (`backups/`, хранится
+  ~20 последних), база в `data/` переживает пересоздание контейнера;
+- если новая версия падает на старте — автоматический откат на предыдущий образ
+  и снимок БД, при этом запуск помечается **failed**;
+- приложение работает через long polling и **не открывает входящих HTTP-портов**
+  (без nginx/Traefik/webhook);
+- секреты (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_IDS`) живут только в
+  серверном `/opt/daily-reflection-bot/.env` и в GitHub Environment — никогда в
+  коде workflow.
+
+Одновременен максимум один прод-деплой (concurrency group). Ручной повторный
+запуск поддерживается через `workflow_dispatch` (полный путь: тесты → образ →
+backup → deploy).
+
+Подробные пошаговые инструкции:
+
+- **Настройка сервера (разово):** [`deploy/TIMEWEB_SETUP.md`](deploy/TIMEWEB_SETUP.md)
+- **Настройка GitHub (ключи, environment, GHCR):** [`deploy/GITHUB_SETUP.md`](deploy/GITHUB_SETUP.md)
+- **Файлы деплоя:** `deploy/docker-compose.prod.yml`, `deploy/.env.production.example`,
+  `deploy/deploy_remote.sh`, `deploy/bootstrap_server.sh`
+
+Локальный `docker-compose.yml` для разработки не меняется; production использует
+отдельный `deploy/docker-compose.prod.yml`.
+
+---
+
 ## Известные ограничения v1
 
 - FSM незавершённого опроса живёт в памяти процесса (`MemoryStorage`). После
