@@ -19,13 +19,17 @@ from datetime import UTC, date, datetime
 import pytest
 
 from app.bot import texts
-from app.bot.handlers import daily, export, morning, stats
-from app.database.models import DailyEntry, MorningIntent
+from app.bot.handlers import daily, export, morning, stats, weekly
+from app.database.models import DailyEntry, MorningIntent, WeeklyReflection
 from app.database.session import session_scope
 from app.scheduler.scheduler import ReflectionScheduler
 from app.services import checkin_service, time_service, weekly_service
 from tests.test_handlers import (  # noqa: F401
+    BOT_TG_ID,
+    FakeChat,
+    FakeMessage,
     FakeState,
+    FakeUser,
     app_runtime,
     bot_message,
     callback,
@@ -292,6 +296,108 @@ async def test_export_before_0500_excludes_new_calendar_day(
     rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
     # The new calendar day (Sep 21) must not have entered the range yet.
     assert [r["date"] for r in rows] == ["2026-09-20"]
+
+
+# --------------------------------------------------------------------------
+# Review follow-up P0: the scheduled evening prompt carries the day keyboard
+# directly — the FIRST score tap must freeze target_date, not _finalize.
+# --------------------------------------------------------------------------
+async def test_direct_score_click_freezes_reflection_day(
+    app_runtime, session, user, session_factory, monkeypatch  # noqa: F811
+) -> None:
+    # No /checkin and no _handle_checkin_request beforehand: FSM starts empty.
+    _freeze(monkeypatch, daily, _utc((1, 58, 0)))  # 04:58 MSK
+    state = FakeState()
+    await daily.step_day(callback("ci:day:4", user_id=111, message=bot_message()), state)
+    assert state.data["target_date"] == PREV.isoformat()
+
+    await daily.step_mood(callback("ci:mood:3", user_id=111, message=bot_message()), state)
+    await daily.step_energy(callback("ci:energy:2", user_id=111, message=bot_message()), state)
+
+    _freeze(monkeypatch, daily, _utc((2, 1, 0)))  # 05:01 MSK at completion
+    await daily.skip_reflection(
+        callback("ci:ref:no", user_id=111, message=bot_message()), state
+    )
+
+    with session_scope(session_factory) as s:
+        entries = s.query(DailyEntry).filter_by(user_id=user.id).all()
+        assert len(entries) == 1
+        assert entries[0].entry_date == PREV  # NOT the post-rollover calendar day
+
+
+async def test_step_day_keeps_already_frozen_target_date(
+    app_runtime, session, user, monkeypatch  # noqa: F811
+) -> None:
+    # Explicit-start flows already froze the date: step_day must not touch it.
+    _freeze(monkeypatch, daily, _utc((2, 30, 0)))  # 05:30 MSK — a *different* day
+    state = FakeState({"target_date": PREV.isoformat()})
+    await daily.step_day(callback("ci:day:4", user_id=111, message=bot_message()), state)
+    assert state.data["target_date"] == PREV.isoformat()
+    assert state.data["day_score"] == 4
+
+
+# --------------------------------------------------------------------------
+# Review follow-up P1: weekly offer follows the frozen evening day
+# --------------------------------------------------------------------------
+class _MarkupRecorder(FakeMessage):
+    """Bot-authored message that also records the reply markup of answers."""
+
+    def __init__(self) -> None:
+        super().__init__(FakeChat(111), FakeUser(BOT_TG_ID))
+        self.markups: list[object] = []
+
+    async def answer(self, text: str, reply_markup=None, **kwargs) -> None:
+        self.answers.append(text)
+        self.markups.append(reply_markup)
+
+
+async def test_weekly_offer_follows_frozen_entry_date(
+    app_runtime, session, user, monkeypatch  # noqa: F811
+) -> None:
+    # Live clock is already Monday 05:01 (reflection day Monday): a time-based
+    # offer check would say "no". The entry is frozen to Sunday -> offer yes,
+    # and the offer button carries the Sunday's week start.
+    _freeze(monkeypatch, weekly_service, _utc((2, 1, 0)))
+    state = FakeState(
+        {
+            "day_score": 4,
+            "mood_score": 3,
+            "energy_score": 2,
+            "target_date": PREV.isoformat(),  # Sunday 2026-09-20
+        }
+    )
+    recorder = _MarkupRecorder()
+    await daily.skip_reflection(callback("ci:ref:no", user_id=111, message=recorder), state)
+
+    assert texts.WEEKLY_OFFER in recorder.answers
+    keyboard = recorder.markups[-1]
+    assert keyboard is not None
+    assert keyboard.inline_keyboard[0][0].callback_data == "wk:start:2026-09-14"
+
+
+# --------------------------------------------------------------------------
+# Review follow-up P1: the weekly flow itself freezes its target week
+# --------------------------------------------------------------------------
+async def test_weekly_flow_from_dated_offer_saves_frozen_week(
+    app_runtime, session, user, session_factory, monkeypatch  # noqa: F811
+) -> None:
+    # Rollover already happened: a time-based week computation would now
+    # produce the NEW week (2026-09-21). The offer's baked date must win.
+    _freeze(monkeypatch, weekly_service, _utc((2, 1, 0)))
+    state = FakeState()
+    await weekly.start_weekly(
+        callback("wk:start:2026-09-14", user_id=111, message=bot_message()), state
+    )
+    assert state.data["week_start"] == "2026-09-14"
+
+    await weekly.ans_q1(user_message(111, "релиз"), state)
+    await weekly.ans_q2(user_message(111, "созвон"), state)
+    await weekly.ans_q3(user_message(111, "чтение"), state)
+
+    with session_scope(session_factory) as s:
+        rows = s.query(WeeklyReflection).filter_by(user_id=user.id).all()
+        assert len(rows) == 1
+        assert rows[0].week_start_date == date(2026, 9, 14)  # not the 09-21 week
 
 
 # --------------------------------------------------------------------------

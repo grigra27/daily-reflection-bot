@@ -6,6 +6,8 @@ and encodes only the integer score, never a display value.
 
 from __future__ import annotations
 
+from datetime import date
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot import texts
@@ -102,11 +104,16 @@ def reminder_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def weekly_offer_keyboard() -> InlineKeyboardMarkup:
+def weekly_offer_keyboard(week_start: date | None = None) -> InlineKeyboardMarkup:
+    """When ``week_start`` is given it is baked into the callback data
+    (v1.1.1), so the offer stays bound to the right week even after the
+    05:00 rollover or a bot restart — the answer is carried by the button
+    itself, not by FSM state."""
+    start_cb = f"wk:start:{week_start.isoformat()}" if week_start else "wk:start"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Да", callback_data="wk:start"),
+                InlineKeyboardButton(text="Да", callback_data=start_cb),
                 InlineKeyboardButton(text="Не сейчас", callback_data="wk:no"),
             ]
         ]

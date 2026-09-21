@@ -6,6 +6,8 @@ optional and can be skipped.
 
 from __future__ import annotations
 
+from datetime import date
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -49,9 +51,22 @@ async def _ask(message: Message, state: FSMContext, index: int) -> None:
     await message.answer(q, reply_markup=keyboards.skip_keyboard(f"wk:{code}"))
 
 
-@router.callback_query(F.data == "wk:start")
+@router.callback_query(F.data.startswith("wk:start"))
 async def start_weekly(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
+    # v1.1.1: the offer bakes its week start into the callback data
+    # (``wk:start:YYYY-MM-DD``), so it survives the 05:00 rollover and a bot
+    # restart. Freeze that date into the FSM at flow start; a legacy button
+    # without a date freezes the then-current week instead.
+    parts = cb.data.split(":")  # type: ignore[union-attr]
+    if len(parts) > 2:
+        week_start = date.fromisoformat(parts[2])
+    else:
+        runtime = get_runtime()
+        with session_scope(runtime.session_factory) as session:
+            user = authorize(session, runtime.settings, cb.from_user.id)
+            week_start = weekly_service.current_week_start(user)
+    await state.update_data(week_start=week_start.isoformat())
     if cb.message:
         await _ask(cb.message, state, 0)
 
@@ -78,6 +93,7 @@ async def _advance(
 
 async def _save(message: Message, state: FSMContext, telegram_user_id: int) -> None:
     data = await state.get_data()
+    week_start = data.get("week_start")
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
         user = authorize(session, runtime.settings, telegram_user_id)
@@ -87,6 +103,8 @@ async def _save(message: Message, state: FSMContext, telegram_user_id: int) -> N
             best_event=data.get("best_event"),
             energy_drainer=data.get("energy_drainer"),
             want_more=data.get("want_more"),
+            # The week frozen at flow start — never re-derived at save time.
+            week_start=date.fromisoformat(week_start) if week_start else None,
         )
     # Only drop the answers once the reflection is durably saved.
     await state.clear()

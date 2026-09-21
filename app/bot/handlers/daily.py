@@ -20,7 +20,7 @@ from app.database.session import session_scope
 from app.runtime import get_runtime
 from app.services import checkin_service, morning_service, weekly_service
 from app.services.auth_service import authorize
-from app.services.time_service import reflection_day
+from app.services.time_service import reflection_day, week_start_date
 
 router = Router(name="daily")
 router.message.filter(AuthorizedFilter(), PrivateChatFilter())
@@ -133,7 +133,19 @@ async def cb_show_today(cb: CallbackQuery) -> None:
 async def step_day(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     value = int(cb.data.split(":")[2])  # type: ignore[union-attr]
-    await state.update_data(day_score=value)
+    data = await state.get_data()
+    if data.get("target_date"):
+        await state.update_data(day_score=value)
+    else:
+        # Scheduled-prompt path: the evening notification carries the day
+        # keyboard directly, so no explicit start ever froze the date.
+        # Freeze it at the FIRST score tap (identity: cb.from_user, never
+        # cb.message.from_user) — not later in _finalize.
+        runtime = get_runtime()
+        with session_scope(runtime.session_factory) as session:
+            user = authorize(session, runtime.settings, cb.from_user.id)
+            frozen = reflection_day(user.timezone)
+        await state.update_data(target_date=frozen.isoformat(), day_score=value)
     await state.set_state(CheckinStates.waiting_mood)
     if cb.message:
         await cb.message.edit_text(texts.Q_MOOD, reply_markup=keyboards.mood_keyboard())
@@ -229,7 +241,10 @@ async def _finalize(
             reflection_text=reflection_text,
             entry_date=_target_date_from_state(data, user),
         )
-        offer_weekly = weekly_service.should_offer_weekly(session, user)
+        # Weekly semantics follow the day the entry was actually saved to
+        # (v1.1.1): a Sunday flow finalized after the Monday 05:00 rollover
+        # still gets the Sunday offer.
+        offer_weekly = weekly_service.should_offer_weekly(session, user, today=entry.entry_date)
 
     # FSM is cleared only after the entry is durably saved; a DB/auth failure
     # leaves the answers in place instead of silently discarding them.
@@ -245,7 +260,12 @@ async def _finalize(
         # cannot edit it, so the confirmation goes out as a new message.
         await target.answer(done)
     if offer_weekly:
-        await target.answer(texts.WEEKLY_OFFER, reply_markup=keyboards.weekly_offer_keyboard())
+        await target.answer(
+            texts.WEEKLY_OFFER,
+            reply_markup=keyboards.weekly_offer_keyboard(
+                week_start_date(entry.entry_date)  # bound into the callback data
+            ),
+        )
 
 
 # --------------------------------------------------------------------------
