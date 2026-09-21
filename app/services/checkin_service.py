@@ -1,7 +1,8 @@
 """Daily check-in business logic.
 
 Persists a completed check-in as a single DailyEntry for the user's current
-local date. Scores are validated here (never in the Telegram layer); the
+Reflection Day (see ``reflection_day`` — rolls over at 05:00 user-local).
+Scores are validated here (never in the Telegram layer); the
 "one row per day / update on edit / double-tap safe" rule is delegated to the
 repository's idempotent upsert.
 """
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.database.models import DailyEntry, User
 from app.database.repositories import DailyEntryRepository
-from app.services.time_service import user_today
+from app.services.time_service import reflection_day
 
 MAX_REFLECTION_LENGTH = 4000
 
@@ -51,7 +52,7 @@ def save_daily_entry(
     _validate_score("day_score", day_score)
     _validate_score("mood_score", mood_score)
     _validate_score("energy_score", energy_score)
-    target_date = entry_date or user_today(user.timezone)
+    target_date = entry_date or reflection_day(user.timezone)
     return DailyEntryRepository(session).upsert(
         user_id=user.id,
         entry_date=target_date,
@@ -63,7 +64,7 @@ def save_daily_entry(
 
 
 def get_entry(session: Session, user: User, entry_date: date | None = None) -> DailyEntry | None:
-    target_date = entry_date or user_today(user.timezone)
+    target_date = entry_date or reflection_day(user.timezone)
     return DailyEntryRepository(session).get(user.id, target_date)
 
 

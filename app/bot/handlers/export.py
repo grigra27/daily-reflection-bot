@@ -12,7 +12,7 @@ from app.database.session import session_scope
 from app.runtime import get_runtime
 from app.services import export_service
 from app.services.auth_service import authorize
-from app.services.time_service import user_today
+from app.services.time_service import reflection_day
 
 router = Router(name="export")
 router.message.filter(AuthorizedFilter(), PrivateChatFilter())
@@ -31,7 +31,10 @@ async def cb_export(cb: CallbackQuery) -> None:
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
         user = authorize(session, runtime.settings, cb.from_user.id)
-        today = user_today(user.timezone)
+        # Scope boundaries, year scope, future exclusion and the filename all
+        # key off the Reflection Day (v1.1.1): before 05:00 local the new
+        # calendar date is not yet a new day of data.
+        today = reflection_day(user.timezone)
         filename, data = export_service.export_user_csv(session, user, scope=scope, today=today)
 
     await cb.answer()

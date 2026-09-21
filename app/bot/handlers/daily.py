@@ -6,6 +6,8 @@ validation and "today" computation live in the service layer.
 
 from __future__ import annotations
 
+from datetime import date
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -18,7 +20,7 @@ from app.database.session import session_scope
 from app.runtime import get_runtime
 from app.services import checkin_service, morning_service, weekly_service
 from app.services.auth_service import authorize
-from app.services.time_service import user_today
+from app.services.time_service import reflection_day, week_start_date
 
 router = Router(name="daily")
 router.message.filter(AuthorizedFilter(), PrivateChatFilter())
@@ -28,11 +30,25 @@ router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
 # --------------------------------------------------------------------------
 # Starting the check-in
 # --------------------------------------------------------------------------
-def _evening_header(session, user) -> str:
-    """First evening question with morning context — one renderer for the
-    scheduled prompt (via notifications.send_checkin_prompt), /checkin, the
-    main menu and editing (all go through ``texts.evening_header_for``)."""
-    return texts.evening_header_for(morning_service.get_intent(session, user))
+def _evening_header(session, user, target_date: date) -> str:
+    """First evening question with morning context for ``target_date`` — one
+    renderer for the scheduled prompt (via notifications.send_checkin_prompt),
+    /checkin, the main menu and editing (all go through
+    ``texts.evening_header_for``)."""
+    return texts.evening_header_for(
+        morning_service.get_intent(session, user, intention_date=target_date)
+    )
+
+
+def _target_date_from_state(data: dict, user) -> date:
+    """The Reflection Day frozen at flow start (v1.1.1), so a flow crossing
+    05:00 still saves to the day it began on. Falls back to the current
+    reflection day for flows started before the upgrade (no frozen date in
+    FSM data)."""
+    frozen = data.get("target_date")
+    if frozen:
+        return date.fromisoformat(frozen)
+    return reflection_day(user.timezone)
 
 
 async def _handle_checkin_request(
@@ -48,6 +64,10 @@ async def _handle_checkin_request(
     restarting (baseline section 14). ``act:edit`` passes allow_edit — it *is*
     the edit choice from that menu.
 
+    The target Reflection Day is computed once here and frozen into FSM data
+    (v1.1.1): the existing-entry check, the morning context and the final
+    save all use that same date even if the clock crosses 05:00 mid-flow.
+
     ``message`` is only the Telegram target to reply into; identity always
     comes from the caller: ``message.from_user.id`` for messages,
     ``cb.from_user.id`` for callbacks (a callback's message was authored by the
@@ -57,11 +77,16 @@ async def _handle_checkin_request(
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
         user = authorize(session, runtime.settings, telegram_user_id)
-        already_done = checkin_service.has_entry_today(session, user)
-        header = None if already_done and not allow_edit else _evening_header(session, user)
+        target_date = reflection_day(user.timezone)
+        already_done = (
+            checkin_service.get_entry(session, user, entry_date=target_date) is not None
+        )
+        header = None if already_done and not allow_edit else _evening_header(session, user, target_date)
     if header is None:
         await message.answer(texts.ALREADY_FILLED, reply_markup=keyboards.filled_choice_keyboard())
     else:
+        # Only freeze the date when the flow really starts.
+        await state.update_data(target_date=target_date.isoformat())
         await message.answer(header, reply_markup=keyboards.day_keyboard())
 
 
@@ -108,7 +133,19 @@ async def cb_show_today(cb: CallbackQuery) -> None:
 async def step_day(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     value = int(cb.data.split(":")[2])  # type: ignore[union-attr]
-    await state.update_data(day_score=value)
+    data = await state.get_data()
+    if data.get("target_date"):
+        await state.update_data(day_score=value)
+    else:
+        # Scheduled-prompt path: the evening notification carries the day
+        # keyboard directly, so no explicit start ever froze the date.
+        # Freeze it at the FIRST score tap (identity: cb.from_user, never
+        # cb.message.from_user) — not later in _finalize.
+        runtime = get_runtime()
+        with session_scope(runtime.session_factory) as session:
+            user = authorize(session, runtime.settings, cb.from_user.id)
+            frozen = reflection_day(user.timezone)
+        await state.update_data(target_date=frozen.isoformat(), day_score=value)
     await state.set_state(CheckinStates.waiting_mood)
     if cb.message:
         await cb.message.edit_text(texts.Q_MOOD, reply_markup=keyboards.mood_keyboard())
@@ -202,8 +239,12 @@ async def _finalize(
             mood_score=mood,
             energy_score=energy,
             reflection_text=reflection_text,
+            entry_date=_target_date_from_state(data, user),
         )
-        offer_weekly = weekly_service.should_offer_weekly(session, user)
+        # Weekly semantics follow the day the entry was actually saved to
+        # (v1.1.1): a Sunday flow finalized after the Monday 05:00 rollover
+        # still gets the Sunday offer.
+        offer_weekly = weekly_service.should_offer_weekly(session, user, today=entry.entry_date)
 
     # FSM is cleared only after the entry is durably saved; a DB/auth failure
     # leaves the answers in place instead of silently discarding them.
@@ -219,7 +260,12 @@ async def _finalize(
         # cannot edit it, so the confirmation goes out as a new message.
         await target.answer(done)
     if offer_weekly:
-        await target.answer(texts.WEEKLY_OFFER, reply_markup=keyboards.weekly_offer_keyboard())
+        await target.answer(
+            texts.WEEKLY_OFFER,
+            reply_markup=keyboards.weekly_offer_keyboard(
+                week_start_date(entry.entry_date)  # bound into the callback data
+            ),
+        )
 
 
 # --------------------------------------------------------------------------
@@ -229,12 +275,15 @@ async def _show_today(message: Message, telegram_user_id: int) -> None:
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
         user = authorize(session, runtime.settings, telegram_user_id)
-        entry = checkin_service.get_entry(session, user)
-        intent = morning_service.get_intent(session, user)
+        # One reflection day resolved once (v1.1.1): heading and DB rows can
+        # never disagree even if the clock crosses 05:00 mid-render.
+        day = reflection_day(user.timezone)
+        entry = checkin_service.get_entry(session, user, entry_date=day)
+        intent = morning_service.get_intent(session, user, intention_date=day)
 
     await message.answer(
         texts.today_message(
-            user_today(user.timezone),
+            day,
             entry.day_score if entry else None,
             entry.mood_score if entry else None,
             entry.energy_score if entry else None,
