@@ -15,7 +15,7 @@ from app.database.session import session_scope
 from app.runtime import get_runtime
 from app.services import stats_service
 from app.services.auth_service import authorize
-from app.services.time_service import user_today
+from app.services.time_service import reflection_day
 
 router = Router(name="stats")
 router.message.filter(AuthorizedFilter(), PrivateChatFilter())
@@ -59,7 +59,9 @@ async def _build_stats(event: Message | CallbackQuery, period_days: int):
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
         user = authorize(session, runtime.settings, event.from_user.id)
-        today = user_today(user.timezone)
+        # Trailing period ends on the current Reflection Day (v1.1.1), so
+        # before 05:00 local the previous day is still "today".
+        today = reflection_day(user.timezone)
         start = today - timedelta(days=period_days - 1)
         entries = DailyEntryRepository(session).list_in_range(user.id, start, today)
     stats = stats_service.compute_stats(entries, period_days=period_days, today=today)

@@ -3,10 +3,14 @@
 Two steps: main intention, then an optional secondary one. The main intention
 is committed to the DB immediately after step 1 — if the process restarts
 before secondary is answered, main is already persisted. Handlers stay thin:
-validation and persistence live in ``morning_service``.
+validation and persistence live in ``morning_service``. Since v1.1.1 the
+target Reflection Day is frozen into FSM data at flow start, so a flow that
+crosses the 05:00 rollover mid-way still writes both steps to one row.
 """
 
 from __future__ import annotations
+
+from datetime import date
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -21,10 +25,20 @@ from app.runtime import get_runtime
 from app.services import morning_service
 from app.services.auth_service import authorize
 from app.services.morning_service import MorningValidationError
+from app.services.time_service import reflection_day
 
 router = Router(name="morning")
 router.message.filter(AuthorizedFilter(), PrivateChatFilter())
 router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
+
+
+def _target_date_from_state(data: dict, user) -> date:
+    """The Reflection Day frozen at flow start (v1.1.1). Falls back to the
+    current reflection day for flows started before the upgrade."""
+    frozen = data.get("target_date")
+    if frozen:
+        return date.fromisoformat(frozen)
+    return reflection_day(user.timezone)
 
 
 async def _ask_main(message: Message, state: FSMContext) -> None:
@@ -39,19 +53,9 @@ async def _ask_secondary(message: Message, state: FSMContext) -> None:
     )
 
 
-async def _show_morning(message: Message, telegram_user_id: int) -> None:
+async def _show_morning(message: Message, intent) -> None:
     """Repeat /morning shows the existing record instead of silently
     overwriting it."""
-    runtime = get_runtime()
-    with session_scope(runtime.session_factory) as session:
-        user = authorize(session, runtime.settings, telegram_user_id)
-        intent = morning_service.get_intent(session, user)
-    if intent is None:
-        await message.answer(
-            texts.morning_record_message(None, None),
-            reply_markup=keyboards.morning_prompt_keyboard(),
-        )
-        return
     await message.answer(
         texts.morning_record_message(intent.main_intention, intent.secondary_intention),
         reply_markup=keyboards.morning_edit_keyboard(),
@@ -60,15 +64,19 @@ async def _show_morning(message: Message, telegram_user_id: int) -> None:
 
 async def _handle_morning_request(message: Message, state: FSMContext) -> None:
     """/morning and the menu button: explicit start clears any stale FSM flow
-    first (already-saved DB data is never touched)."""
+    first (already-saved DB data is never touched). The target Reflection Day
+    is computed once (v1.1.1): the existing-record check and the flow both
+    use that same logical date, and it is frozen into FSM data."""
     await state.clear()
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
         user = authorize(session, runtime.settings, message.from_user.id)
-        has_intent = morning_service.has_intent_today(session, user)
-    if has_intent:
-        await _show_morning(message, message.from_user.id)
+        target_date = reflection_day(user.timezone)
+        intent = morning_service.get_intent(session, user, intention_date=target_date)
+    if intent is not None:
+        await _show_morning(message, intent)
     else:
+        await state.update_data(target_date=target_date.isoformat())
         await _ask_main(message, state)
 
 
@@ -88,6 +96,13 @@ async def cb_start_morning(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     # Identity from cb.from_user: cb.message was sent by the bot.
     await state.clear()
+    runtime = get_runtime()
+    with session_scope(runtime.session_factory) as session:
+        user = authorize(session, runtime.settings, cb.from_user.id)
+        target_date = reflection_day(user.timezone)
+    # Freeze the date before step 1 (v1.1.1): even if the flow crosses 05:00,
+    # both steps land on the same MorningIntent row.
+    await state.update_data(target_date=target_date.isoformat())
     if cb.message is not None:
         await _ask_main(cb.message, state)
 
@@ -102,7 +117,10 @@ async def submit_main(message: Message, state: FSMContext) -> None:
     try:
         with session_scope(runtime.session_factory) as session:
             user = authorize(session, runtime.settings, message.from_user.id)
-            morning_service.save_main_intention(session, user, text)
+            data = await state.get_data()
+            morning_service.save_main_intention(
+                session, user, text, intention_date=_target_date_from_state(data, user)
+            )
     except MorningValidationError:
         await message.answer(texts.INTENTION_EMPTY)
         return
@@ -144,13 +162,17 @@ async def _finish_secondary(
     edit_target: bool = False,
 ) -> None:
     runtime = get_runtime()
+    data = await state.get_data()
     try:
         with session_scope(runtime.session_factory) as session:
             user = authorize(session, runtime.settings, telegram_user_id)
-            intent = morning_service.set_secondary(session, user, text)
+            # Same frozen date as step 1 — never re-derived from the clock.
+            intent = morning_service.set_secondary(
+                session, user, text, intention_date=_target_date_from_state(data, user)
+            )
     except MorningValidationError:
-        # Only reachable when the row vanished (e.g. midnight rolled over
-        # between the two steps) — restart the flow cleanly.
+        # Only reachable when the row vanished (e.g. it was deleted between
+        # the two steps) — restart the flow cleanly.
         await state.set_state(MorningStates.waiting_main)
         await target.answer(texts.Q_MAIN_INTENTION)
         return

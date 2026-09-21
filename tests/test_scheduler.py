@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.database.models import DailyEntry, MorningIntent, User
 from app.database.session import session_scope
 from app.scheduler.scheduler import ReflectionScheduler
-from app.services.time_service import user_today
+from app.services.time_service import reflection_day
 
 
 class FakeBot:
@@ -42,7 +42,7 @@ def _entry_exists(session_factory, user_pk: int) -> None:
         s.add(
             DailyEntry(
                 user_id=user_pk,
-                entry_date=user_today("UTC"),
+                entry_date=reflection_day("UTC"),
                 day_score=4, mood_score=4, energy_score=4,
             )
         )
@@ -87,7 +87,7 @@ def _intent_exists(session_factory, user_pk: int) -> None:
         s.add(
             MorningIntent(
                 user_id=user_pk,
-                intention_date=user_today("UTC"),
+                intention_date=reflection_day("UTC"),
                 main_intention="focus",
             )
         )
@@ -124,7 +124,7 @@ async def test_morning_job_uses_user_local_today(session, session_factory, fake_
         s.add(
             MorningIntent(
                 user_id=u.id,
-                intention_date=user_today("Europe/Moscow"),
+                intention_date=reflection_day("Europe/Moscow"),
                 main_intention="focus",
             )
         )

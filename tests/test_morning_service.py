@@ -12,7 +12,7 @@ from app.database.models import MorningIntent, User
 from app.database.repositories import MorningIntentRepository
 from app.services import morning_service
 from app.services.morning_service import MorningValidationError
-from app.services.time_service import user_today
+from app.services.time_service import reflection_day
 
 
 def _mk_user(session: Session, tg_id: int = 111) -> User:
@@ -181,9 +181,10 @@ def test_set_secondary_requires_existing_row(session: Session, user: User) -> No
         morning_service.set_secondary(session, user, "orphan")
 
 
-def test_dates_use_user_local_today(session: Session) -> None:
+def test_dates_use_user_reflection_day(session: Session) -> None:
     u = _mk_user(session)
     intent = morning_service.save_main_intention(session, u, "A")
-    assert intent.intention_date == user_today("UTC")
+    # v1.1.1: default date is the logical Reflection Day, not calendar today.
+    assert intent.intention_date == reflection_day("UTC")
     assert morning_service.has_intent_today(session, u)
     assert morning_service.get_intent(session, u) is not None

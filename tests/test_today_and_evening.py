@@ -11,7 +11,7 @@ from app.database.models import DailyEntry, User
 from app.database.repositories import UserRepository
 from app.database.session import session_scope
 from app.services import morning_service
-from app.services.time_service import user_today
+from app.services.time_service import reflection_day
 from tests.test_handlers import (  # noqa: F401
     BOT_TG_ID,
     FakeState,
@@ -140,7 +140,7 @@ async def test_existing_evening_score_flow_semantics_unchanged(
     assert texts.done_message(4, 3, 2) in target.edits
 
 
-async def test_morning_intent_is_stored_on_user_local_date(
+async def test_morning_intent_is_stored_on_reflection_day(
     app_runtime, session_factory  # noqa: F811
 ) -> None:
     await _write_morning()
@@ -148,7 +148,8 @@ async def test_morning_intent_is_stored_on_user_local_date(
         user = s.query(User).filter_by(telegram_user_id=111).one()
         intent = morning_service.get_intent(s, user)
         assert intent is not None
-        assert intent.intention_date == user_today(user.timezone)
+        # v1.1.1: the logical day, not the raw calendar date.
+        assert intent.intention_date == reflection_day(user.timezone)
 
 
 # --------------------------------------------------------------------------
@@ -210,7 +211,9 @@ async def test_act_checkin_callback_clears_stale_evening_fsm(
     state.state = CheckinStates.waiting_mood
     await daily.cb_start_checkin(callback("act:checkin", user_id=111), state)
     assert state.state is None
-    assert state.data == {}
+    # v1.1.1: stale answers are gone; the fresh flow carries only the frozen
+    # target Reflection Day.
+    assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
     assert state.cleared >= 1
     _assert_bot_never_becomes_a_user(session_factory)
 
@@ -222,7 +225,7 @@ async def test_act_edit_callback_clears_stale_fsm_before_restarting(
     state.state = CheckinStates.waiting_energy
     await daily.cb_start_checkin(callback("act:edit", user_id=111, message=bot_message()), state)
     assert state.state is None
-    assert state.data == {}
+    assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
     _assert_bot_never_becomes_a_user(session_factory)
 
 

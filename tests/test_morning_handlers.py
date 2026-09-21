@@ -20,6 +20,7 @@ from app.database.repositories import UserRepository
 from app.database.session import session_scope
 from app.services import morning_service
 from app.services.auth_service import NotAuthorizedError
+from app.services.time_service import reflection_day
 from tests.test_handlers import (
     BOT_TG_ID,
     FakeState,
@@ -207,7 +208,8 @@ async def test_explicit_evening_start_clears_stale_morning_fsm(app_runtime) -> N
     await daily.cmd_checkin(user_message(111, "/checkin"), state)
     assert state.cleared >= 1
     assert state.state is None
-    assert state.data == {}
+    # v1.1.1: only the frozen target Reflection Day survives the clear.
+    assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
 
 
 async def test_explicit_morning_start_clears_stale_checkin_fsm(app_runtime) -> None:  # noqa: F811
@@ -216,7 +218,8 @@ async def test_explicit_morning_start_clears_stale_checkin_fsm(app_runtime) -> N
     await morning.menu_morning(user_message(111, "☀️ Утренний фокус"), state)
     assert state.cleared >= 1
     assert state.state is MorningStates.waiting_main  # fresh flow, no old data
-    assert state.data == {}
+    # v1.1.1: only the frozen target Reflection Day survives the clear.
+    assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
 
 
 # --------------------------------------------------------------------------

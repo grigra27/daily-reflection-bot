@@ -2,7 +2,8 @@
 
 Validation lives here (never in the Telegram layer): texts are trimmed,
 required/optional normalised and length-capped. User-visible text is never
-logged. Dates are always the user's local date via ``user_today``.
+logged. Dates are always the user's Reflection Day via ``reflection_day``
+(rolls over at 05:00 user-local).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.database.models import MorningIntent, User
 from app.database.repositories import MorningIntentRepository
-from app.services.time_service import user_today
+from app.services.time_service import reflection_day
 
 MAX_INTENTION_LENGTH = 1000
 
@@ -46,7 +47,7 @@ def save_main_intention(
     """Step 1: persist immediately, keeping any existing secondary value."""
     return MorningIntentRepository(session).upsert(
         user_id=user.id,
-        intention_date=intention_date or user_today(user.timezone),
+        intention_date=intention_date or reflection_day(user.timezone),
         main_intention=_clean_main(text),
     )
 
@@ -56,7 +57,7 @@ def set_secondary(
 ) -> MorningIntent:
     """Step 2: update the same row. Raises MorningValidationError(MISSING_INTENT)
     if step 1 never committed."""
-    target_date = intention_date or user_today(user.timezone)
+    target_date = intention_date or reflection_day(user.timezone)
     repo = MorningIntentRepository(session)
     if repo.get(user.id, target_date) is None:
         raise MorningValidationError(MISSING_INTENT)
@@ -68,7 +69,7 @@ def set_secondary(
 
 
 def get_intent(session: Session, user: User, intention_date: date | None = None) -> MorningIntent | None:
-    target_date = intention_date or user_today(user.timezone)
+    target_date = intention_date or reflection_day(user.timezone)
     return MorningIntentRepository(session).get(user.id, target_date)
 
 
