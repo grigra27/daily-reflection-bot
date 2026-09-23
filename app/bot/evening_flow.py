@@ -30,9 +30,12 @@ class EveningPrompt:
     step: EveningStep
     text: str
     markup: InlineKeyboardMarkup
-    #: None for the day ratings, exactly as before v1.2: that step is reached
-    # from a keyboard tap rather than a state-gated handler.
-    state: State | None
+    #: The state the flow is in while this question is open. Every step has one
+    #: — including the day ratings, which since v1.2 are a real step of the
+    #: evening rather than a keyboard floating outside the FSM. An empty FSM
+    #: therefore means exactly one thing: there is no flow, only an old message
+    #: (a scheduled prompt) that is being tapped.
+    state: State
 
 
 def build_evening_prompt(
@@ -72,7 +75,7 @@ def build_evening_prompt(
         step,
         texts.evening_day_prompt(intent),
         keyboards.day_keyboard(target_date),
-        None,
+        CheckinStates.waiting_day,
     )
 
 
@@ -98,3 +101,20 @@ def outcome_tap_is_open(state_value: str | None, outcome_field: str) -> bool:
     if state_value is None:
         return True
     return _OUTCOME_FIELD_BY_STATE.get(state_value) == outcome_field
+
+
+#: The only states a day rating may be answered in: no flow at all, and the day
+#: question itself.
+_DAY_STATES: frozenset[str | None] = frozenset({None, CheckinStates.waiting_day.state})
+
+
+def day_tap_is_open(state_value: str | None) -> bool:
+    """Whether a ``ci:day:*`` button belongs to the flow that is open now.
+
+    The rating steps are the ones a scheduled prompt can offer without any FSM,
+    so nothing else gates this tap and it has to be asked here: while an
+    outcome question is open the evening has not reached the ratings at all, and
+    a leftover day button answered there would jump over the intention the user
+    still owes and re-open a step that is already done.
+    """
+    return state_value in _DAY_STATES

@@ -41,7 +41,11 @@ async def send_checkin_prompt(
 ) -> None:
     """The evening prompt: the first still-open step for that day — closing
     the main intention, then the secondary one, then the day ratings (or
-    straight to the ratings when there is no morning intention at all)."""
+    straight to the ratings when there is no morning intention at all).
+
+    Only the text and the keyboard are used: a message sent on a schedule
+    creates no FSM, so a tap on one of its buttons is what a stateless flow looks
+    like, and it stays valid after a restart."""
     prompt = evening_flow.build_evening_prompt(intent, target_date)
     try:
         await bot.send_message(chat_id, prompt.text, reply_markup=prompt.markup)

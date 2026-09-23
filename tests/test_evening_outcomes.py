@@ -170,7 +170,7 @@ async def test_evening_without_a_plan_is_the_unchanged_v1_flow(
 ) -> None:
     msg, state = await ask_evening()
     assert msg.answers[-1] == texts.CHECKIN_HEADER
-    assert state.state is None
+    assert state.state == CheckinStates.waiting_day
     assert not any(b.startswith("ci:out:") for b in button_data(msg.markups[-1]))
 
     await close_scores(state)
@@ -195,7 +195,7 @@ async def test_main_only_plan_asks_main_then_the_day(
     prompt = await tap(f"ci:out:main:done:{today.isoformat()}", state)
     # No secondary intention was written, so step B is simply absent.
     assert prompt.edits[-1] == texts.evening_day_prompt(fetch(session_factory))
-    assert state.state is None
+    assert state.state == CheckinStates.waiting_day
     assert button_data(prompt.edit_markups[-1]) == [
         f"ci:day:{v}:{today.isoformat()}" for v in (1, 2, 3, 4, 5)
     ]
@@ -219,7 +219,7 @@ async def test_main_and_secondary_plan_asks_both_in_order(
 
     prompt2 = await tap(f"ci:out:secondary:partial:{today.isoformat()}", state)
     assert prompt2.edits[-1] == texts.evening_day_prompt(fetch(session_factory))
-    assert state.state is None
+    assert state.state == CheckinStates.waiting_day
     # The secondary field stays ONE question: two items inside it, one answer.
     assert outcomes(session_factory) == ("done", "partial")
 
@@ -281,7 +281,7 @@ async def test_resume_continues_at_the_first_unanswered_step(
     await tap(f"ci:out:secondary:done:{today}", state2)
     third, state3 = await ask_evening()
     assert third.answers[-1] == texts.evening_day_prompt(fetch(session_factory))
-    assert state3.state is None
+    assert state3.state == CheckinStates.waiting_day
     assert not any(b.startswith("ci:out:") for b in button_data(third.markups[-1]))
 
 
@@ -388,11 +388,12 @@ async def test_the_same_button_tapped_through_an_edit_does_change_it(
     await plan()
     _, state = await ask_evening()
     await tap(f"ci:out:main:done:{today}", state)
+    await tap(f"ci:out:secondary:done:{today}", state)
     await close_scores(state)
 
     target, edit_state = await start_edit()
     await tap(f"ci:out:main:not_done:{today}", edit_state, message=target)
-    assert outcomes(session_factory) == ("not_done", None)
+    assert outcomes(session_factory) == ("not_done", "done")
     assert count(session_factory, DailyEntry) == 1
 
 
@@ -452,14 +453,17 @@ async def test_double_tap_writes_one_row_and_keeps_the_last_answer(
 ) -> None:
     today = reflection_day(TZ).isoformat()
     await plan(secondary=None)
-    _, state = await ask_evening()
+    # Repeated taps of the scheduled prompt, which carries no FSM of its own:
+    # each one is admitted on its own merits, and none of them adds a row.
+    # (Inside a flow that already moved on, the same button is refused — see
+    # test_an_outcome_button_cannot_rewind_from_the_day_question.)
     for _ in range(3):
-        await tap(f"ci:out:main:done:{today}", state)
+        await tap(f"ci:out:main:done:{today}", FakeState())
     assert outcomes(session_factory) == ("done", None)
     assert count(session_factory, MorningIntent) == 1
     assert count(session_factory, DailyEntry) == 0
     # A deliberate change of mind is allowed and stays on the same row.
-    await tap(f"ci:out:main:not_done:{today}", state)
+    await tap(f"ci:out:main:not_done:{today}", FakeState())
     assert outcomes(session_factory) == ("not_done", None)
     assert count(session_factory, MorningIntent) == 1
 
@@ -641,7 +645,9 @@ async def test_today_shows_a_result_line_per_recorded_outcome(
     await daily.cmd_today(view)
     assert "○ Ещё: ещё\nРезультат: ❌ Нет" in view.answers[-1]
 
-    await tap(f"ci:out:main:done:{today}", state)
+    # Correcting the first answer from here on is a tap on the old message, not
+    # a step of this flow: the evening already moved on to the day ratings.
+    await tap(f"ci:out:main:done:{today}", FakeState())
     view = logged_user_message(ME, "/today")
     await daily.cmd_today(view)
     assert "🎯 Главное: главное\nРезультат: ✅ Да" in view.answers[-1]
@@ -794,6 +800,7 @@ async def test_an_edit_can_change_the_scores_of_a_filled_day(
     # day rating itself — and carries the permission that start created.
     assert target.answers[-1] == texts.evening_day_prompt(None)
     assert state.data["edit_mode"] is True
+    assert state.state == CheckinStates.waiting_day
 
     await close_scores(state, scores=(2, 3, 4))
     assert entry_scores(session_factory) == (2, 3, 4)
@@ -844,3 +851,117 @@ async def test_an_outcome_button_cannot_hijack_an_open_rating_flow(
     # The mood question is still the one being asked.
     await daily.step_mood(callback("ci:mood:4", user_id=ME), state)
     assert state.state == CheckinStates.waiting_energy
+
+
+# --------------------------------------------------------------------------
+# Review P0 (round 3): the day ratings are a real step of the evening, so a
+# leftover button of either kind is only ever a scheduled tap or nothing
+# --------------------------------------------------------------------------
+async def test_a_stale_day_button_cannot_jump_over_the_main_outcome(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    await plan()
+    _, state = await ask_evening()
+    assert state.state == CheckinStates.waiting_main_outcome
+
+    target = logged_bot_message()
+    await daily.step_day(
+        callback(f"ci:day:5:{reflection_day(TZ).isoformat()}", user_id=ME, message=target), state
+    )
+    assert state.state == CheckinStates.waiting_main_outcome  # still owed
+    assert "day_score" not in state.data  # and nothing was answered for it
+    assert outcomes(session_factory) == (None, None)
+    assert target.edits == []
+
+
+async def test_a_stale_day_button_cannot_jump_over_the_secondary_outcome(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    today = reflection_day(TZ).isoformat()
+    await plan()
+    _, state = await ask_evening()
+    await tap(f"ci:out:main:done:{today}", state)
+    assert state.state == CheckinStates.waiting_secondary_outcome
+
+    target = logged_bot_message()
+    await daily.step_day(callback(f"ci:day:5:{today}", user_id=ME, message=target), state)
+    assert state.state == CheckinStates.waiting_secondary_outcome
+    assert "day_score" not in state.data
+    assert outcomes(session_factory) == ("done", None)  # nothing closed early
+    assert target.edits == []
+
+
+async def test_the_day_question_is_a_state_of_the_evening(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    # Reaching the ratings used to mean falling out of the FSM, which made a
+    # live evening indistinguishable from an old message.
+    today = reflection_day(TZ).isoformat()
+    await plan()
+    _, state = await ask_evening()
+    await tap(f"ci:out:main:done:{today}", state)
+    await tap(f"ci:out:secondary:done:{today}", state)
+    assert state.state == CheckinStates.waiting_day
+
+    await daily.step_day(callback(f"ci:day:4:{today}", user_id=ME), state)
+    assert state.state == CheckinStates.waiting_mood
+    assert state.data["day_score"] == 4
+
+
+async def test_an_outcome_button_cannot_rewind_from_the_day_question(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    today = reflection_day(TZ).isoformat()
+    await plan()
+    _, state = await ask_evening()
+    await tap(f"ci:out:main:done:{today}", state)
+    await tap(f"ci:out:secondary:partial:{today}", state)
+    assert state.state == CheckinStates.waiting_day
+
+    target = logged_bot_message()
+    await daily.step_outcome(
+        callback(f"ci:out:main:not_done:{today}", user_id=ME, message=target), state
+    )
+    assert outcomes(session_factory) == ("done", "partial")
+    assert state.state == CheckinStates.waiting_day
+    assert target.edits == []
+
+
+async def test_edit_permission_alone_does_not_make_a_stale_outcome_tap_valid(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    # Permission and staleness are different questions: an edit may rewrite a
+    # filled day, but only through the step it is being asked right now.
+    today = reflection_day(TZ).isoformat()
+    await plan(secondary=None)
+    _, state = await ask_evening()
+    await tap(f"ci:out:main:done:{today}", state)
+    await close_scores(state)  # the evening, and with it the DailyEntry
+
+    target, edit_state = await start_edit()
+    await tap(f"ci:out:main:partial:{today}", edit_state, message=target)
+    assert edit_state.state == CheckinStates.waiting_day
+    assert edit_state.data["edit_mode"] is True
+
+    stale = logged_bot_message()
+    await daily.step_outcome(
+        callback(f"ci:out:main:not_done:{today}", user_id=ME, message=stale), edit_state
+    )
+    assert outcomes(session_factory) == ("partial", None)
+    assert edit_state.state == CheckinStates.waiting_day
+    assert stale.edits == []
+
+
+async def test_a_scheduled_day_button_still_starts_the_evening_with_no_fsm(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    yesterday = reflection_day(TZ) - timedelta(days=1)
+    state = FakeState()
+    target = logged_bot_message()
+    await daily.step_day(
+        callback(f"ci:day:4:{yesterday.isoformat()}", user_id=ME, message=target), state
+    )
+    assert state.data["target_date"] == yesterday.isoformat()  # frozen from the button
+    assert state.data["day_score"] == 4
+    assert state.state == CheckinStates.waiting_mood
+    assert target.edits[-1] == texts.Q_MOOD

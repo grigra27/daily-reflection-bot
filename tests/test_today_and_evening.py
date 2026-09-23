@@ -215,7 +215,7 @@ async def test_act_checkin_callback_clears_stale_evening_fsm(
     state = FakeState({"day_score": 5})
     state.state = CheckinStates.waiting_mood
     await daily.cb_start_checkin(callback("act:checkin", user_id=111), state)
-    assert state.state is None
+    assert state.state == CheckinStates.waiting_day
     # v1.1.1: stale answers are gone; the fresh flow carries only the frozen
     # target Reflection Day.
     assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
@@ -229,7 +229,7 @@ async def test_act_edit_callback_clears_stale_fsm_before_restarting(
     state = FakeState({"main": "leftover"})
     state.state = CheckinStates.waiting_energy
     await daily.cb_start_checkin(callback("act:edit", user_id=111, message=bot_message()), state)
-    assert state.state is None
+    assert state.state == CheckinStates.waiting_day
     assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
     _assert_bot_never_becomes_a_user(session_factory)
 

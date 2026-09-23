@@ -253,21 +253,29 @@ async def step_outcome(cb: CallbackQuery, state: FSMContext) -> None:
 # --------------------------------------------------------------------------
 @router.callback_query(F.data.startswith("ci:day:"))
 async def step_day(cb: CallbackQuery, state: FSMContext) -> None:
-    """``ci:day:<score>[:<date>]`` — the first rating, and the only step that
-    has no FSM state gating it, because the scheduled evening prompt offers it
-    with an empty flow.
+    """``ci:day:<score>[:<date>]`` — the first rating. It is the one evening
+    handler the router cannot gate on a state, because the scheduled prompt
+    offers it with no flow at all; so the handler applies the admission rule
+    itself: the tap is either the day question of an open evening
+    (``waiting_day``) or a prompt from a flow that no longer exists.
 
-    Being stateless does not make it safe, though: this tap opens the part of
-    the evening that ends in the day's ``DailyEntry``. A button left on screen
-    from an evening that has since been closed elsewhere must not re-open it,
-    so — exactly like an outcome tap — this one continues over a filled day only
-    for a flow the user opened as an edit. Nothing is written here; the answers
-    are only carried to finalisation, which is where the entry is saved.
+    Neither of those makes it safe on its own: this tap opens the part of the
+    evening that ends in the day's ``DailyEntry``. A button left on screen from
+    an evening that has since been closed elsewhere must not re-open it, so —
+    exactly like an outcome tap — it continues over a filled day only for a flow
+    the user opened as an edit. Nothing is written here; the answers are only
+    carried to finalisation, which is where the entry is saved.
     """
     await cb.answer()
     parts = (cb.data or "").split(":")
     value = int(parts[2])
     data = await state.get_data()
+    if not evening_flow.day_tap_is_open(await state.get_state()):
+        # The evening is asking something else — an intention still owed, or a
+        # rating already given. Asked before the DB and before any FSM write, so
+        # a wrong button leaves the flow exactly where it was.
+        logger.info("Day callback the open flow did not ask for; ignored")
+        return
     edit_mode = bool(data.get("edit_mode"))
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
