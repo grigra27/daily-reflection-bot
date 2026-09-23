@@ -1,4 +1,4 @@
-"""Unified /today snapshot + evening morning-context tests (v1.1, spec 27)."""
+"""Unified /today snapshot + evening flow entry tests (v1.1, spec 27; v1.2 loop closure)."""
 
 from __future__ import annotations
 
@@ -93,17 +93,22 @@ async def test_today_neither(app_runtime) -> None:  # noqa: F811
 
 
 # --------------------------------------------------------------------------
-# Evening flow: morning context, existing semantics unchanged
+# Evening flow entry: step A replaces the v1.1 morning-context header (v1.2)
 # --------------------------------------------------------------------------
-async def test_evening_header_shows_morning_intention(app_runtime) -> None:  # noqa: F811
+async def test_evening_opens_with_the_main_outcome_question(app_runtime) -> None:  # noqa: F811
+    # v1.2 step A: an intention exists, so the evening closes the loop before
+    # asking for the day scores.
     await _write_morning(secondary="зал")
     msg = user_message(111, "/checkin")
-    await daily.cmd_checkin(msg, FakeState())
+    state = FakeState()
+    await daily.cmd_checkin(msg, state)
     header = msg.answers[-1]
-    assert "Утром ты планировал:" in header
-    assert "🎯 Главное: backup Flow" in header
-    assert "○ Ещё: зал" in header
-    assert "Как в целом прошёл твой день?" in header
+    assert "🎯 <b>Главное сегодня:</b>" in header
+    assert "backup Flow" in header
+    assert texts.Q_OUTCOME in header
+    assert "Как в целом прошёл твой день?" not in header
+    assert state.state == CheckinStates.waiting_main_outcome
+    assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
 
 
 async def test_evening_header_without_morning_stays_v1_neutral(app_runtime) -> None:  # noqa: F811
@@ -171,9 +176,9 @@ async def test_act_checkin_callback_starts_evening_flow_for_tapper(
     target = bot_message()
     await daily.cb_start_checkin(callback("act:checkin", user_id=111, message=target), FakeState())
     header = target.answers[-1]
-    assert "Утром ты планировал:" in header
-    assert "🎯 Главное: backup Flow" in header
-    assert "Как в целом прошёл твой день?" in header
+    assert "🎯 <b>Главное сегодня:</b>" in header
+    assert "backup Flow" in header
+    assert texts.Q_OUTCOME in header
     _assert_bot_never_becomes_a_user(session_factory)
 
 
@@ -187,8 +192,8 @@ async def test_act_edit_callback_starts_edit_flow_when_entry_exists(
     # Editing must reach the first question, not bounce back to "already filled".
     assert texts.ALREADY_FILLED not in target.answers
     header = target.answers[-1]
-    assert "Утром ты планировал:" in header
-    assert "Как в целом прошёл твой день?" in header
+    assert "🎯 <b>Главное сегодня:</b>" in header
+    assert texts.Q_OUTCOME in header
     _assert_bot_never_becomes_a_user(session_factory)
 
 

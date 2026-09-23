@@ -47,6 +47,29 @@ def _add_intents(
     session.commit()
 
 
+def _add_intent_with_outcomes(
+    session: Session,
+    user: User,
+    d: date,
+    *,
+    main: str = "главное",
+    secondary: str | None = "ещё",
+    main_outcome: str | None = None,
+    secondary_outcome: str | None = None,
+) -> None:
+    session.add(
+        MorningIntent(
+            user_id=user.id,
+            intention_date=d,
+            main_intention=main,
+            secondary_intention=secondary,
+            main_outcome=main_outcome,
+            secondary_outcome=secondary_outcome,
+        )
+    )
+    session.commit()
+
+
 def _rows(data: bytes) -> list[dict[str, str]]:
     return list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
 
@@ -56,16 +79,20 @@ def test_export_contains_only_current_user(session: Session) -> None:
     b = _make_user(session, 222)
     _add_entries(session, a, [date(2026, 9, 17), date(2026, 9, 18)])
     _add_entries(session, b, [date(2026, 9, 18)])
-    _add_intents(session, b, {date(2026, 9, 18): ("B-plan", None)})
+    _add_intent_with_outcomes(
+        session, b, date(2026, 9, 18), main="B-plan", secondary=None, main_outcome="done"
+    )
 
     filename, data = export_service.export_user_csv(session, a, scope="all", today=TODAY)
     assert filename == "reflection_export_2026-09-18.csv"
     rows = _rows(data)
     assert len(rows) == 2
     assert all(r["day_score"] == "4" for r in rows)
-    # User B's data (evening and morning) must not appear even on shared dates.
+    # User B's data (evening, morning and outcomes) must not appear even on
+    # shared dates.
     assert {r["date"] for r in rows} == {"2026-09-17", "2026-09-18"}
     assert all(r["morning_main_intention"] == "" for r in rows)
+    assert all(r["morning_main_outcome"] == "" for r in rows)
 
 
 def test_csv_handles_cyrillic_and_special_chars(session: Session) -> None:
@@ -162,14 +189,16 @@ def test_missing_secondary_is_empty_string(session: Session) -> None:
     assert _rows(data)[0]["morning_secondary_intention"] == ""
 
 
-def test_header_fields_match_v11_contract(session: Session) -> None:
+def test_header_fields_match_v12_contract(session: Session) -> None:
     a = _make_user(session, 111)
     _, data = export_service.export_user_csv(session, a, scope="all", today=TODAY)
     header = next(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
     assert header == [
         "date",
         "morning_main_intention",
+        "morning_main_outcome",
         "morning_secondary_intention",
+        "morning_secondary_outcome",
         "morning_created_at",
         "day_score",
         "mood_score",
@@ -178,6 +207,52 @@ def test_header_fields_match_v11_contract(session: Session) -> None:
         "evening_created_at",
         "evening_updated_at",
     ]
+
+
+def test_outcome_columns_carry_canonical_values(session: Session) -> None:
+    a = _make_user(session, 111)
+    _add_intent_with_outcomes(
+        session, a, date(2026, 9, 17),
+        main="главное 17", secondary=None, main_outcome="partial",
+    )
+    _add_intent_with_outcomes(
+        session, a, date(2026, 9, 18),
+        main_outcome="done", secondary_outcome="not_done",
+    )
+
+    _, data = export_service.export_user_csv(session, a, scope="all", today=TODAY)
+    main_only, both = _rows(data)
+    assert (main_only["morning_main_outcome"], main_only["morning_secondary_outcome"]) == (
+        "partial", "",
+    )
+    # A missing secondary intention has no outcome either, even though the
+    # row was written with one — the export never invents pairing.
+    assert both["morning_main_outcome"] == "done"
+    assert both["morning_secondary_outcome"] == "not_done"
+
+
+def test_missing_outcomes_export_as_empty_not_null(session: Session) -> None:
+    # Historical (pre-v1.2) rows: both outcome columns NULL.
+    a = _make_user(session, 111)
+    _add_intents(session, a, {date(2026, 9, 18): ("главное", "ещё")})
+    _, data = export_service.export_user_csv(session, a, scope="all", today=TODAY)
+    row = _rows(data)[0]
+    assert row["morning_main_outcome"] == ""
+    assert row["morning_secondary_outcome"] == ""
+    assert "None" not in data.decode("utf-8-sig")
+
+
+def test_outcomes_export_without_an_evening_entry(session: Session) -> None:
+    # Outcomes persist immediately, so a half-finished evening is a real state:
+    # morning cells filled, day_score still blank.
+    a = _make_user(session, 111)
+    _add_intent_with_outcomes(
+        session, a, date(2026, 9, 18), main_outcome="done", secondary_outcome="partial"
+    )
+    _, data = export_service.export_user_csv(session, a, scope="all", today=TODAY)
+    row = _rows(data)[0]
+    assert (row["morning_main_outcome"], row["morning_secondary_outcome"]) == ("done", "partial")
+    assert row["day_score"] == "" and row["evening_created_at"] == ""
 
 
 def test_unknown_scope_is_rejected(session: Session) -> None:

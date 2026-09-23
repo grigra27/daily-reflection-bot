@@ -1,7 +1,8 @@
 """Inline keyboards for the bot.
 
 Emoji/labels live here (presentation). Callback data is intentionally compact
-and encodes only the integer score, never a display value.
+and encodes only system-controlled values — an integer score or a canonical
+outcome — never a display value or any user text.
 """
 
 from __future__ import annotations
@@ -15,16 +16,47 @@ from app.bot import texts
 SCORES = (1, 2, 3, 4, 5)
 
 
-def _score_row(field: str, emoji: dict[int, str]) -> list[InlineKeyboardButton]:
+def _dated(callback_data: str, target_date: date | None) -> str:
+    """Bake the target Reflection Day into a callback (v1.2).
+
+    A scheduled Telegram message never creates FSM state, and MemoryStorage can
+    be lost to a restart — the date carried by the button itself keeps the tap
+    bound to the day it was written for, even after the 05:00 rollover. With no
+    date the legacy form is produced, so messages sent before the upgrade stay
+    tappable.
+    """
+    return callback_data if target_date is None else f"{callback_data}:{target_date.isoformat()}"
+
+
+def _score_row(
+    field: str, emoji: dict[int, str], target_date: date | None = None
+) -> list[InlineKeyboardButton]:
     return [
-        InlineKeyboardButton(text=f"{emoji[v]} {v}", callback_data=f"ci:{field}:{v}")
+        InlineKeyboardButton(
+            text=f"{emoji[v]} {v}", callback_data=_dated(f"ci:{field}:{v}", target_date)
+        )
         for v in SCORES
     ]
 
 
-def day_keyboard() -> InlineKeyboardMarkup:
+def day_keyboard(target_date: date | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[_score_row("day", texts.DAY_EMOJI)]
+        inline_keyboard=[_score_row("day", texts.DAY_EMOJI, target_date)]
+    )
+
+
+def outcome_keyboard(field: str, target_date: date | None = None) -> InlineKeyboardMarkup:
+    """The three evening outcomes for one morning intention (``field`` is
+    "main" or "secondary") — e.g. ``ci:out:main:partial:2026-09-23``."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=label, callback_data=_dated(f"ci:out:{field}:{value}", target_date)
+                )
+                for value, label in texts.OUTCOME_LABEL.items()
+            ]
+        ]
     )
 
 

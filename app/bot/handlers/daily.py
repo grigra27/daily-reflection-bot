@@ -1,11 +1,15 @@
 """Daily check-in FSM, /today and /checkin (baseline sections 5-14, 30).
 
 Handlers stay thin: they drive the FSM and Telegram UI, while persistence,
-validation and "today" computation live in the service layer.
+validation and "today" computation live in the service layer. Since v1.2 the
+evening opens by closing the morning intentions (``app.bot.evening_flow``
+decides which question is first), and each outcome is saved the instant it is
+tapped — long before the day entry itself exists.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 
 from aiogram import F, Router
@@ -13,7 +17,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.bot import keyboards, texts
+from app.bot import evening_flow, keyboards, texts
 from app.bot.deps import AuthorizedFilter, PrivateChatFilter
 from app.bot.states import CheckinStates
 from app.database.session import session_scope
@@ -26,18 +30,23 @@ router = Router(name="daily")
 router.message.filter(AuthorizedFilter(), PrivateChatFilter())
 router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
 
+logger = logging.getLogger("app.daily")
+
 
 # --------------------------------------------------------------------------
 # Starting the check-in
 # --------------------------------------------------------------------------
-def _evening_header(session, user, target_date: date) -> str:
-    """First evening question with morning context for ``target_date`` — one
-    renderer for the scheduled prompt (via notifications.send_checkin_prompt),
-    /checkin, the main menu and editing (all go through
-    ``texts.evening_header_for``)."""
-    return texts.evening_header_for(
-        morning_service.get_intent(session, user, intention_date=target_date)
-    )
+def _baked_date(parts: list[str], index: int) -> date | None:
+    """Read the Reflection Day baked into callback data by the keyboard
+    builder. Messages sent before v1.2 carry no date and return None, so the
+    caller falls back to the v1.1.1 clock logic."""
+    if len(parts) <= index:
+        return None
+    try:
+        return date.fromisoformat(parts[index])
+    except ValueError:
+        logger.warning("Ignoring unparseable date in callback data")
+        return None
 
 
 def _target_date_from_state(data: dict, user) -> date:
@@ -68,6 +77,10 @@ async def _handle_checkin_request(
     (v1.1.1): the existing-entry check, the morning context and the final
     save all use that same date even if the clock crosses 05:00 mid-flow.
 
+    Which question opens the evening is decided by the shared evening step
+    rule (v1.2): outcomes still owed come first, and editing a filled day
+    restarts from the main outcome so a mistapped answer can be corrected.
+
     ``message`` is only the Telegram target to reply into; identity always
     comes from the caller: ``message.from_user.id`` for messages,
     ``cb.from_user.id`` for callbacks (a callback's message was authored by the
@@ -81,13 +94,22 @@ async def _handle_checkin_request(
         already_done = (
             checkin_service.get_entry(session, user, entry_date=target_date) is not None
         )
-        header = None if already_done and not allow_edit else _evening_header(session, user, target_date)
-    if header is None:
+        prompt = (
+            None
+            if already_done and not allow_edit
+            else evening_flow.build_evening_prompt(
+                morning_service.get_intent(session, user, intention_date=target_date),
+                target_date,
+                restart=already_done,
+            )
+        )
+    if prompt is None:
         await message.answer(texts.ALREADY_FILLED, reply_markup=keyboards.filled_choice_keyboard())
     else:
         # Only freeze the date when the flow really starts.
         await state.update_data(target_date=target_date.isoformat())
-        await message.answer(header, reply_markup=keyboards.day_keyboard())
+        await state.set_state(prompt.state)
+        await message.answer(prompt.text, reply_markup=prompt.markup)
 
 
 @router.message(F.text == keyboards.reply.BTN_CHECKIN)
@@ -127,25 +149,79 @@ async def cb_show_today(cb: CallbackQuery) -> None:
 
 
 # --------------------------------------------------------------------------
+# Evening outcomes (v1.2): closing the morning intentions
+# --------------------------------------------------------------------------
+@router.callback_query(F.data.startswith("ci:out:"))
+async def step_outcome(cb: CallbackQuery, state: FSMContext) -> None:
+    """``ci:out:<field>:<outcome>[:<date>]`` — save one morning intention's
+    evening answer and move to whatever the day still owes.
+
+    Three things make this handler unusual, and all three are product
+    guarantees: the write is committed here, immediately, so a user who taps
+    «Частично» and closes Telegram still has ``main_outcome = partial`` in the
+    DB long before any DailyEntry exists; the target Reflection Day comes out
+    of the callback, so the tap works with a completely empty FSM (a scheduled
+    prompt that survived a restart); and identity is ``cb.from_user.id``, so
+    one user's tap can never close another user's intention.
+    """
+    await cb.answer()
+    parts = (cb.data or "").split(":")
+    if len(parts) < 4:
+        logger.warning("Malformed outcome callback ignored")
+        return
+    outcome_field, outcome = parts[2], parts[3]
+    runtime = get_runtime()
+    with session_scope(runtime.session_factory) as session:
+        user = authorize(session, runtime.settings, cb.from_user.id)
+        target_date = _baked_date(parts, 4) or reflection_day(user.timezone)
+        try:
+            intent = morning_service.record_outcome(
+                session,
+                user,
+                outcome_field=outcome_field,
+                outcome=outcome,
+                intention_date=target_date,
+            )
+        except morning_service.MorningValidationError:
+            # A stale or hand-crafted callback: an unknown value, or a day with
+            # no morning intention (or no secondary one) to close. Nothing is
+            # written and the ongoing flow is left alone.
+            logger.info("Rejected outcome callback %s", cb.data)
+            return
+        prompt = evening_flow.build_evening_prompt(intent, target_date)
+    await state.update_data(target_date=target_date.isoformat())
+    await state.set_state(prompt.state)
+    if cb.message:
+        await cb.message.edit_text(prompt.text, reply_markup=prompt.markup)
+
+
+# --------------------------------------------------------------------------
 # Score steps (day -> mood -> energy -> reflection)
 # --------------------------------------------------------------------------
 @router.callback_query(F.data.startswith("ci:day:"))
 async def step_day(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
-    value = int(cb.data.split(":")[2])  # type: ignore[union-attr]
+    parts = (cb.data or "").split(":")
+    value = int(parts[2])
     data = await state.get_data()
-    if data.get("target_date"):
-        await state.update_data(day_score=value)
-    else:
-        # Scheduled-prompt path: the evening notification carries the day
-        # keyboard directly, so no explicit start ever froze the date.
-        # Freeze it at the FIRST score tap (identity: cb.from_user, never
-        # cb.message.from_user) — not later in _finalize.
-        runtime = get_runtime()
-        with session_scope(runtime.session_factory) as session:
-            user = authorize(session, runtime.settings, cb.from_user.id)
-            frozen = reflection_day(user.timezone)
-        await state.update_data(target_date=frozen.isoformat(), day_score=value)
+    frozen = data.get("target_date")
+    if not frozen:
+        # Scheduled-prompt path: the evening notification carries a keyboard
+        # directly, so no explicit start froze the date. Freeze it at the FIRST
+        # score tap (identity: cb.from_user, never cb.message.from_user) — not
+        # later in _finalize. Prefer the day baked into the button (v1.2), so
+        # the answer lands on the day the prompt was written for even after the
+        # 05:00 rollover; legacy dateless callbacks from before the upgrade
+        # fall back to the v1.1.1 clock logic.
+        baked = _baked_date(parts, 3)
+        if baked is not None:
+            frozen = baked.isoformat()
+        else:
+            runtime = get_runtime()
+            with session_scope(runtime.session_factory) as session:
+                user = authorize(session, runtime.settings, cb.from_user.id)
+                frozen = reflection_day(user.timezone).isoformat()
+    await state.update_data(target_date=frozen, day_score=value)
     await state.set_state(CheckinStates.waiting_mood)
     if cb.message:
         await cb.message.edit_text(texts.Q_MOOD, reply_markup=keyboards.mood_keyboard())
@@ -288,8 +364,7 @@ async def _show_today(message: Message, telegram_user_id: int) -> None:
             entry.mood_score if entry else None,
             entry.energy_score if entry else None,
             entry.reflection_text if entry else None,
-            morning_main=intent.main_intention if intent else None,
-            morning_secondary=intent.secondary_intention if intent else None,
+            intent,
         ),
         reply_markup=keyboards.today_actions_keyboard(
             has_morning=intent is not None, has_evening=entry is not None

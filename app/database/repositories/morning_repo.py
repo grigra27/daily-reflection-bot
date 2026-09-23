@@ -4,7 +4,9 @@ Mirrors ``DailyEntryRepository``: ``upsert`` guarantees one row per user per
 local date and is race-safe against the UNIQUE(user_id, intention_date)
 constraint. ``_UNCHANGED`` lets callers update only one of the two intention
 fields without clobbering the other (step 1 saves main while secondary stays
-untouched; a later skip explicitly sets secondary to None).
+untouched; a later skip explicitly sets secondary to None). ``set_outcome`` is
+the separate, narrow write used by the v1.2 evening closure: one outcome column
+on an existing row, never the texts and never a new row.
 """
 
 from __future__ import annotations
@@ -32,6 +34,9 @@ class _Unchanged:
 
 _UNCHANGED = _Unchanged()
 type _OptIntention = str | None | _Unchanged
+#: Outcome columns take the same sentinel, so closing one intention can never
+#: blank out the other one's outcome.
+type _OptOutcome = str | None | _Unchanged
 
 
 class MorningIntentRepository:
@@ -93,6 +98,38 @@ class MorningIntentRepository:
             intent.main_intention = main_intention
         if secondary_intention is not _UNCHANGED:
             intent.secondary_intention = secondary_intention
+
+    def set_outcome(
+        self,
+        *,
+        user_id: int,
+        intention_date: date,
+        main_outcome: _OptOutcome = _UNCHANGED,
+        secondary_outcome: _OptOutcome = _UNCHANGED,
+    ) -> MorningIntent | None:
+        """Evening closure write (v1.2): touch only the outcome column the
+        caller passed — never an intention text, never a new row. Returns None
+        when the row is missing so the service can report it. Re-writing the
+        same value leaves the row untouched, which makes double taps
+        idempotent."""
+        intent = self.get(user_id, intention_date)
+        if intent is None:
+            return None
+        self._assign_outcomes(intent, main_outcome, secondary_outcome)
+        self._session.commit()
+        self._session.refresh(intent)
+        return intent
+
+    @staticmethod
+    def _assign_outcomes(
+        intent: MorningIntent,
+        main_outcome: _OptOutcome,
+        secondary_outcome: _OptOutcome,
+    ) -> None:
+        if main_outcome is not _UNCHANGED:
+            intent.main_outcome = main_outcome
+        if secondary_outcome is not _UNCHANGED:
+            intent.secondary_outcome = secondary_outcome
 
     def list_in_range(self, user_id: int, start: date, end: date) -> list[MorningIntent]:
         stmt = (

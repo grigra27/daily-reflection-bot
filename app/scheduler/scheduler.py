@@ -25,6 +25,7 @@ from app.database.repositories import UserRepository
 from app.database.session import session_scope
 from app.services.checkin_service import has_entry_today
 from app.services.morning_service import get_intent, has_intent_today
+from app.services.time_service import reflection_day
 
 logger = logging.getLogger("app.scheduler")
 
@@ -49,17 +50,24 @@ class ReflectionScheduler:
         await notifications.send_morning_prompt(self._bot, chat_id)
 
     async def _daily_job(self, user_pk: int) -> None:
+        """The evening prompt asks for the first step the day still owes:
+        outcomes are already partly saved whenever the user tapped and stopped,
+        so the notifier (``evening_flow``) picks the right question. The job
+        never creates FSM state — the buttons carry the target date instead."""
         with session_scope(self._session_factory) as session:
             user = session.get(User, user_pk)
             if user is None or not user.is_active:
                 return
             already_done = has_entry_today(session, user)
             chat_id = user.telegram_user_id
-            intent = None if already_done else get_intent(session, user)
+            target_date = reflection_day(user.timezone)
+            intent = None if already_done else get_intent(session, user, target_date)
         if already_done:
             logger.info("Check-in skipped for user %s: entry exists today", user_pk)
             return
-        await notifications.send_checkin_prompt(self._bot, chat_id, intent=intent)
+        await notifications.send_checkin_prompt(
+            self._bot, chat_id, intent=intent, target_date=target_date
+        )
 
     async def _reminder_job(self, user_pk: int) -> None:
         with session_scope(self._session_factory) as session:
