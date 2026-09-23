@@ -84,9 +84,17 @@ _OUTCOME_FIELD_BY_STATE: dict[str | None, str] = {
 }
 
 
-def expected_outcome_field(state_value: str | None) -> str | None:
-    """Which outcome the open flow is actually asking for, or None when no
-    outcome question is open. A tap for the *other* field is not a step of this
-    evening — it is a stale button, and answering it would move the user's
-    screen on to a question they never asked."""
-    return _OUTCOME_FIELD_BY_STATE.get(state_value)
+def outcome_tap_is_open(state_value: str | None, outcome_field: str) -> bool:
+    """Whether an outcome button may be answered by the flow that is open now.
+
+    Three cases, with no fourth: no state at all is a scheduled prompt tapped
+    after a restart wiped MemoryStorage, so the button itself decides; an
+    outcome state is asking about exactly one morning field, so a button for
+    the other one is stale; and any *other* active state — a later rating step,
+    the morning, weekly or settings flow — belongs to a different question
+    entirely, where answering an outcome would hijack that flow and move the
+    user's screen on to something they never asked for.
+    """
+    if state_value is None:
+        return True
+    return _OUTCOME_FIELD_BY_STATE.get(state_value) == outcome_field

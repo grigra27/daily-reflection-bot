@@ -740,3 +740,107 @@ async def test_today_never_offers_a_retroactive_morning_for_a_filled_day(
     # A filled evening with no morning row: "записать утро" would promise a write
     # the service now refuses, so only the evening action is left.
     assert await today_buttons() == ["✏️ Изменить итог"]
+
+
+# --------------------------------------------------------------------------
+# Review P0 (round 2): the day score has no state of its own, so it needs the
+# same protection an outcome tap got — at the tap and again at finalisation
+# --------------------------------------------------------------------------
+def _seed_entry(session, user, *, scores: tuple[int, int, int]) -> None:
+    """An evening that got finished without this flow — on another device, from
+    a scheduled prompt. Everything below is about a leftover button not undoing
+    it."""
+    session.add(
+        DailyEntry(
+            user_id=user.id, entry_date=reflection_day(TZ), day_score=scores[0],
+            mood_score=scores[1], energy_score=scores[2],
+        )
+    )
+    session.commit()
+
+
+def entry_scores(session_factory, tg_id: int = ME) -> tuple[int, int, int]:
+    """The one stored evening, as the three ratings."""
+    with session_scope(session_factory) as s:
+        user = UserRepository(s).get_by_telegram_id(tg_id)
+        assert user is not None
+        entry = s.query(DailyEntry).filter_by(user_id=user.id).one()
+        return (entry.day_score, entry.mood_score, entry.energy_score)
+
+
+async def test_a_stale_day_button_cannot_rewrite_a_filled_day(
+    app_runtime, session, user, session_factory  # noqa: F811
+) -> None:
+    _seed_entry(session, user, scores=(5, 4, 3))
+    state = FakeState()
+    target = logged_bot_message()
+
+    # The prompt from earlier is still on screen and its day button gets tapped.
+    await daily.step_day(
+        callback(f"ci:day:1:{reflection_day(TZ).isoformat()}", user_id=ME, message=target), state
+    )
+    assert state.state is None and state.data == {}  # no evening was started
+    assert target.edits == []  # and the user's screen did not move on
+    assert entry_scores(session_factory) == (5, 4, 3)
+    assert count(session_factory, DailyEntry) == 1
+
+
+async def test_an_edit_can_change_the_scores_of_a_filled_day(
+    app_runtime, session, user, session_factory  # noqa: F811
+) -> None:
+    _seed_entry(session, user, scores=(5, 4, 3))
+    target, state = await start_edit()
+    # With no morning plan there is nothing to close, so the edit opens at the
+    # day rating itself — and carries the permission that start created.
+    assert target.answers[-1] == texts.evening_day_prompt(None)
+    assert state.data["edit_mode"] is True
+
+    await close_scores(state, scores=(2, 3, 4))
+    assert entry_scores(session_factory) == (2, 3, 4)
+    assert count(session_factory, DailyEntry) == 1  # updated in place
+
+
+async def test_a_day_closed_elsewhere_survives_the_flow_that_was_finishing_it(
+    app_runtime, session, user, session_factory  # noqa: F811
+) -> None:
+    # The tap-level guard alone would not be enough: this flow started while the
+    # day was still open, and the other device finished it mid-flow.
+    _, state = await ask_evening()
+    await daily.step_day(callback("ci:day:3", user_id=ME), state)
+    await daily.step_mood(callback("ci:mood:3", user_id=ME), state)
+    await daily.step_energy(callback("ci:energy:3", user_id=ME), state)
+
+    _seed_entry(session, user, scores=(5, 4, 3))
+
+    await daily.skip_reflection(callback("ci:ref:no", user_id=ME), state)
+    assert state.state is None and state.data == {}  # the stale flow is finished
+    assert entry_scores(session_factory) == (5, 4, 3)
+    assert count(session_factory, DailyEntry) == 1
+
+
+# --------------------------------------------------------------------------
+# Review P1 (round 2): an outcome button is only answered by a flow that asked
+# for an outcome
+# --------------------------------------------------------------------------
+async def test_an_outcome_button_cannot_hijack_an_open_rating_flow(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    today = reflection_day(TZ).isoformat()
+    await plan(secondary=None)
+    _, state = await ask_evening()
+    await tap(f"ci:out:main:done:{today}", state)  # the loop closed; ratings now
+    await daily.step_day(callback("ci:day:3", user_id=ME), state)
+    assert state.state == CheckinStates.waiting_mood
+
+    target = logged_bot_message()
+    await daily.step_outcome(
+        callback(f"ci:out:main:not_done:{today}", user_id=ME, message=target), state
+    )
+    assert outcomes(session_factory) == ("done", None)  # nothing was rewritten
+    assert state.state == CheckinStates.waiting_mood  # and nothing rewound
+    assert state.data["day_score"] == 3
+    assert target.edits == []
+
+    # The mood question is still the one being asked.
+    await daily.step_mood(callback("ci:mood:4", user_id=ME), state)
+    assert state.state == CheckinStates.waiting_energy
