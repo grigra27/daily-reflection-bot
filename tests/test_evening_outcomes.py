@@ -965,3 +965,84 @@ async def test_a_scheduled_day_button_still_starts_the_evening_with_no_fsm(
     assert state.data["day_score"] == 4
     assert state.state == CheckinStates.waiting_mood
     assert target.edits[-1] == texts.Q_MOOD
+
+
+# --------------------------------------------------------------------------
+# Review (round 4): a stateless day tap is only a day question when the day
+# owes nothing before it — the rollout case is an evening message from v1.1.1
+# --------------------------------------------------------------------------
+async def test_an_old_day_button_becomes_the_closure_question_it_skipped(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    today = reflection_day(TZ)
+    await plan()
+    state = FakeState()
+    target = logged_bot_message()
+
+    await daily.step_day(
+        callback(f"ci:day:5:{today.isoformat()}", user_id=ME, message=target), state
+    )
+    assert "day_score" not in state.data  # no rating was accepted for it
+    assert outcomes(session_factory) == (None, None)  # nothing was closed on its own
+    assert count(session_factory, DailyEntry) == 0
+    # and the old button is not a dead end either: it asks what this day asks.
+    assert state.data == {"target_date": today.isoformat()}
+    assert state.state == CheckinStates.waiting_main_outcome
+    assert target.edits[-1] == texts.q_main_outcome("backup Flow")
+    assert button_data(target.edit_markups[-1]) == outcome_callbacks("main", today)
+
+
+async def test_an_old_day_button_cannot_skip_a_pending_secondary_outcome(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    today = reflection_day(TZ).isoformat()
+    await plan()
+    await tap(f"ci:out:main:done:{today}", FakeState())  # closed from the old message
+
+    state = FakeState()
+    target = logged_bot_message()
+    await daily.step_day(callback(f"ci:day:5:{today}", user_id=ME, message=target), state)
+    assert "day_score" not in state.data
+    assert count(session_factory, DailyEntry) == 0
+    assert outcomes(session_factory) == ("done", None)
+    assert state.state == CheckinStates.waiting_secondary_outcome
+    assert target.edits[-1] == texts.q_secondary_outcome("зал, заказать страховку")
+
+
+async def test_a_day_button_is_still_accepted_statelessly_once_the_loop_is_closed(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    today = reflection_day(TZ).isoformat()
+    await plan()
+    await tap(f"ci:out:main:done:{today}", FakeState())
+    await tap(f"ci:out:secondary:partial:{today}", FakeState())
+
+    state = FakeState()
+    await daily.step_day(callback(f"ci:day:4:{today}", user_id=ME), state)
+    assert state.data["day_score"] == 4
+    assert state.state == CheckinStates.waiting_mood
+    assert outcomes(session_factory) == ("done", "partial")
+
+
+async def test_an_edit_that_reached_the_day_question_continues_to_the_ratings(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    # The check is for taps with no flow behind them, never for an edit that
+    # already re-walked the closure: its stored answers are allowed to be there.
+    today = reflection_day(TZ).isoformat()
+    await plan()
+    _, state = await ask_evening()
+    await tap(f"ci:out:main:done:{today}", state)
+    await tap(f"ci:out:secondary:done:{today}", state)
+    await close_scores(state)
+
+    target, edit_state = await start_edit()
+    await tap(f"ci:out:main:partial:{today}", edit_state, message=target)
+    await tap(f"ci:out:secondary:not_done:{today}", edit_state, message=target)
+    assert edit_state.state == CheckinStates.waiting_day
+    assert edit_state.data["edit_mode"] is True
+
+    await daily.step_day(callback(f"ci:day:2:{today}", user_id=ME), edit_state)
+    assert edit_state.state == CheckinStates.waiting_mood
+    assert edit_state.data["day_score"] == 2
+    assert count(session_factory, DailyEntry) == 1

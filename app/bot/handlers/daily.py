@@ -265,12 +265,20 @@ async def step_day(cb: CallbackQuery, state: FSMContext) -> None:
     exactly like an outcome tap — it continues over a filled day only for a flow
     the user opened as an edit. Nothing is written here; the answers are only
     carried to finalisation, which is where the entry is saved.
+
+    And an open flow is trusted while a stateless one is not: a Day button from
+    before the loop was closed that day, or from a prompt sent before the
+    morning was written, becomes the question the day actually asks instead of
+    quietly skipping it. Only ``waiting_day`` — a flow that got here legitimately
+    — may rate the day without that check, which is also what lets an edit of a
+    filled day pass over its already-answered outcomes.
     """
     await cb.answer()
     parts = (cb.data or "").split(":")
     value = int(parts[2])
     data = await state.get_data()
-    if not evening_flow.day_tap_is_open(await state.get_state()):
+    state_value = await state.get_state()
+    if not evening_flow.day_tap_is_open(state_value):
         # The evening is asking something else — an intention still owed, or a
         # rating already given. Asked before the DB and before any FSM write, so
         # a wrong button leaves the flow exactly where it was.
@@ -284,10 +292,25 @@ async def step_day(cb: CallbackQuery, state: FSMContext) -> None:
         already_filled = checkin_service.get_entry(
             session, user, entry_date=target_date
         ) is not None
+        owed_prompt = None
+        if state_value is None and not already_filled:
+            intent = morning_service.get_intent(session, user, intention_date=target_date)
+            owed = morning_service.next_evening_step(intent)
+            if owed is not morning_service.EveningStep.DAY_SCORE:
+                owed_prompt = evening_flow.build_evening_prompt(intent, target_date)
     if already_filled and not edit_mode:
         # The flow, its stored answers and the existing entry all stay exactly
         # as they are: the user has to choose to edit (spec 14).
         logger.info("Day tap on an already filled Reflection Day; ignored")
+        return
+    if owed_prompt is not None:
+        # The old button is not a dead end and not a skip either: the tap turns
+        # into the closure question it jumped over, on the same day the button
+        # was written for.
+        await state.update_data(target_date=target_date.isoformat())
+        await state.set_state(owed_prompt.state)
+        if cb.message:
+            await cb.message.edit_text(owed_prompt.text, reply_markup=owed_prompt.markup)
         return
     await state.update_data(target_date=target_date.isoformat(), day_score=value)
     await state.set_state(CheckinStates.waiting_mood)

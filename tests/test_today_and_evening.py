@@ -40,11 +40,28 @@ async def _run_score_steps(state: FakeState) -> None:
     await daily.step_energy(callback("ci:energy:2", message=bot_message()), state)
 
 
-async def _write_evening(tg_id: int = 111) -> None:
+async def _closed_loop_flow(tg_id: int = 111) -> FakeState:
+    """/checkin with both closure questions answered, i.e. a flow standing on
+    the day question — the only place a day rating may be tapped from while a
+    morning intention is still owed (v1.2)."""
+    today = reflection_day("Europe/Moscow").isoformat()
     state = FakeState()
-    await _run_score_steps(state)
+    await daily.cmd_checkin(user_message(tg_id, "/checkin"), state)
+    await daily.step_outcome(
+        callback(f"ci:out:main:done:{today}", user_id=tg_id, message=bot_message()), state
+    )
+    await daily.step_outcome(
+        callback(f"ci:out:secondary:partial:{today}", user_id=tg_id, message=bot_message()), state
+    )
+    assert state.state == CheckinStates.waiting_day
+    return state
+
+
+async def _write_evening(tg_id: int = 111, state: FakeState | None = None) -> None:
+    flow = state if state is not None else FakeState()
+    await _run_score_steps(flow)
     await daily.skip_reflection(
-        callback("ci:ref:no", user_id=tg_id, message=bot_message()), state
+        callback("ci:ref:no", user_id=tg_id, message=bot_message()), flow
     )
 
 
@@ -53,7 +70,8 @@ async def _write_evening(tg_id: int = 111) -> None:
 # --------------------------------------------------------------------------
 async def test_today_both_morning_and_evening(app_runtime) -> None:  # noqa: F811
     await _write_morning()
-    await _write_evening()
+    # A day with a morning plan is rated through the evening that closed it.
+    await _write_evening(state=await _closed_loop_flow())
     msg = user_message(111, "/today")
     await daily.cmd_today(msg)
     rendered = msg.answers[-1]
