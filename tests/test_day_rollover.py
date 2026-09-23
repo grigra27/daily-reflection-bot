@@ -20,10 +20,13 @@ import pytest
 
 from app.bot import texts
 from app.bot.handlers import daily, export, morning, stats, weekly
+from app.bot.states import MorningStates
 from app.database.models import DailyEntry, MorningIntent, WeeklyReflection
 from app.database.session import session_scope
+from app.scheduler import scheduler as scheduler_module
 from app.scheduler.scheduler import ReflectionScheduler
 from app.services import checkin_service, time_service, weekly_service
+from tests.test_evening_outcomes import logged_user_message
 from tests.test_handlers import (  # noqa: F401
     BOT_TG_ID,
     FakeChat,
@@ -431,3 +434,164 @@ async def test_daily_and_reminder_jobs_skip_at_0200_when_previous_day_filled(
     await sched._daily_job(user.id)
     await sched._reminder_job(user.id)
     assert bot.sent == []
+
+
+# --------------------------------------------------------------------------
+# v1.2: the evening closure obeys the same 05:00 contract
+# --------------------------------------------------------------------------
+def _seed_plan(session, user, day: date = PREV) -> None:
+    session.add(
+        MorningIntent(
+            user_id=user.id, intention_date=day, main_intention="вечерний фокус",
+            secondary_intention="второе",
+        )
+    )
+    session.commit()
+
+
+async def test_closure_across_0500_lands_entirely_on_the_frozen_day(
+    app_runtime, session, user, session_factory, monkeypatch  # noqa: F811
+) -> None:
+    # 04:58 MSK: the evening starts on the PREV reflection day and every button
+    # it renders is baked with that date.
+    _seed_plan(session, user)
+    _freeze(monkeypatch, daily, _utc((1, 58, 0)))
+    state = FakeState()
+    msg = logged_user_message(111, "/checkin")
+    await daily.cmd_checkin(msg, state)
+    assert state.data == {"target_date": PREV.isoformat()}
+    assert f"ci:out:main:done:{PREV.isoformat()}" in _buttons(msg)
+
+    # The user takes two minutes: the clock crosses 05:00 mid-flow.
+    _freeze(monkeypatch, daily, _utc((2, 1, 0)))
+    await daily.step_outcome(
+        callback(f"ci:out:main:partial:{PREV.isoformat()}", user_id=111, message=bot_message()),
+        state,
+    )
+    await daily.step_outcome(
+        callback(f"ci:out:secondary:done:{PREV.isoformat()}", user_id=111, message=bot_message()),
+        state,
+    )
+    await daily.step_day(callback(f"ci:day:4:{PREV.isoformat()}", user_id=111), state)
+    await daily.step_mood(callback("ci:mood:3", user_id=111), state)
+    await daily.step_energy(callback("ci:energy:2", user_id=111), state)
+    await daily.skip_reflection(callback("ci:ref:no", user_id=111, message=bot_message()), state)
+
+    with session_scope(session_factory) as s:
+        intents = s.query(MorningIntent).filter_by(user_id=user.id).all()
+        assert len(intents) == 1  # no row invented for the new logical day
+        assert intents[0].intention_date == PREV
+        assert (intents[0].main_outcome, intents[0].secondary_outcome) == ("partial", "done")
+        entries = s.query(DailyEntry).filter_by(user_id=user.id).all()
+        assert len(entries) == 1
+        assert entries[0].entry_date == PREV  # NOT the post-rollover day
+
+
+async def test_baked_outcome_button_ignores_the_rolled_over_clock(
+    app_runtime, session, user, session_factory, monkeypatch  # noqa: F811
+) -> None:
+    # A prompt from before 05:00 is tapped after it, with no FSM at all
+    # (scheduled message + restart). The button's own date must win.
+    _seed_plan(session, user)
+    _freeze(monkeypatch, daily, _utc((2, 5, 0)))  # 05:05 MSK: logical day is CUR
+    await daily.step_outcome(
+        callback(f"ci:out:main:done:{PREV.isoformat()}", user_id=111, message=bot_message()),
+        FakeState(),
+    )
+    with session_scope(session_factory) as s:
+        rows = s.query(MorningIntent).filter_by(user_id=user.id).all()
+        assert [(r.intention_date, r.main_outcome) for r in rows] == [(PREV, "done")]
+
+
+async def test_outcome_tap_for_todays_plan_uses_todays_row(
+    app_runtime, session, user, session_factory, monkeypatch  # noqa: F811
+) -> None:
+    # The mirror case: PREV already has a closed outcome. A tap baked with CUR
+    # must touch only the CUR plan, never drift onto the neighbouring day.
+    _seed_plan(session, user, day=PREV)
+    _seed_plan(session, user, day=CUR)
+    with session_scope(session_factory) as s:
+        s.query(MorningIntent).filter_by(intention_date=PREV).one().main_outcome = "not_done"
+        s.commit()
+    _freeze(monkeypatch, daily, _utc((2, 0, 0)))  # 05:00 MSK
+    state = FakeState()
+    await daily.step_outcome(
+        callback(f"ci:out:main:done:{CUR.isoformat()}", user_id=111, message=bot_message()), state
+    )
+    assert state.data == {"target_date": CUR.isoformat()}
+    with session_scope(session_factory) as s:
+        by_date = {r.intention_date: r.main_outcome for r in s.query(MorningIntent)}
+        assert by_date == {PREV: "not_done", CUR: "done"}
+
+
+async def test_morning_view_of_the_new_day_stays_editable_after_rollover(
+    app_runtime, session, user, session_factory, monkeypatch  # noqa: F811
+) -> None:
+    # The lock is per Reflection Day: closing PREV's evening must not freeze
+    # the brand-new day that starts at 05:00.
+    _seed_plan(session, user)
+    with session_scope(session_factory) as s:
+        s.query(MorningIntent).filter_by(intention_date=PREV).one().main_outcome = "done"
+        s.commit()
+
+    _freeze(monkeypatch, morning, _utc((2, 1, 0)))  # 05:01 MSK -> CUR
+    state = FakeState()
+    msg = user_message(111, "/morning")
+    await morning.cmd_morning(msg, state)
+    assert state.state == MorningStates.waiting_main
+    assert texts.Q_MAIN_INTENTION in msg.answers
+    assert texts.MORNING_LOCKED_OUTCOME not in msg.answers
+
+    # The previous day, viewed at 04:59, is read-only.
+    _freeze(monkeypatch, morning, _utc((1, 59, 0)))
+    locked = FakeState()
+    msg2 = user_message(111, "/morning")
+    await morning.cmd_morning(msg2, locked)
+    assert texts.MORNING_LOCKED_OUTCOME in msg2.answers[-1]
+    assert locked.state is None and locked.data == {}
+
+
+async def test_scheduled_evening_prompt_at_0200_closes_yesterdays_plan(
+    session, user, session_factory, monkeypatch
+) -> None:
+    # 02:00 MSK on the 21st is still the 20th for this user: the prompt must
+    # offer yesterday's closure, and its buttons must carry yesterday's date.
+    _seed_plan(session, user)
+    _freeze(monkeypatch, scheduler_module, _utc((23, 0, 0), PREV))
+    _freeze(monkeypatch, checkin_service, _utc((23, 0, 0), PREV))
+    bot = _MarkupBot()
+    sched = ReflectionScheduler(session_factory, bot)  # type: ignore[arg-type]
+    await sched._daily_job(user.id)
+    assert len(bot.sent) == 1
+    assert "вечерний фокус" in bot.sent[0][1]
+    assert f"ci:out:main:done:{PREV.isoformat()}" in bot.buttons
+    # The reminder still fires while the day entry is missing, even though the
+    # evening has already been partly answered (spec 21).
+    await sched._reminder_job(user.id)
+    assert len(bot.sent) == 2
+
+
+def _buttons(message) -> list[str]:
+    """Callback data of the keyboard the fake message was last answered with."""
+    markup = getattr(message, "markups", [None])[-1]
+    if markup is None:
+        return []
+    return [b.callback_data or "" for row in markup.inline_keyboard for b in row]
+
+
+class _MarkupBot:
+    """Fake bot that keeps the keyboard of every scheduled message."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str]] = []
+        self.buttons: list[str] = []
+
+    async def send_message(self, chat_id: int, text: str, **kwargs) -> None:
+        self.sent.append((chat_id, text))
+        self.buttons += _buttons_of(kwargs.get("reply_markup"))
+
+
+def _buttons_of(markup) -> list[str]:
+    if markup is None:
+        return []
+    return [b.callback_data or "" for row in markup.inline_keyboard for b in row]

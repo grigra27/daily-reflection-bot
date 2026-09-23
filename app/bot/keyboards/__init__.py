@@ -2,6 +2,7 @@
 
 from app.bot.keyboards import reply
 from app.bot.keyboards.inline import (
+    MorningAction,
     day_keyboard,
     energy_keyboard,
     export_keyboard,
@@ -9,6 +10,7 @@ from app.bot.keyboards.inline import (
     mood_keyboard,
     morning_edit_keyboard,
     morning_prompt_keyboard,
+    outcome_keyboard,
     reflection_choice_keyboard,
     reminder_keyboard,
     settings_keyboard,
@@ -19,6 +21,7 @@ from app.bot.keyboards.inline import (
 )
 
 __all__ = [
+    "MorningAction",
     "day_keyboard",
     "energy_keyboard",
     "export_keyboard",
@@ -26,6 +29,7 @@ __all__ = [
     "mood_keyboard",
     "morning_edit_keyboard",
     "morning_prompt_keyboard",
+    "outcome_keyboard",
     "reflection_choice_keyboard",
     "reminder_keyboard",
     "reply",

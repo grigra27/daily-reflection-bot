@@ -1,8 +1,10 @@
 """Telegram presentation texts and emoji/score formatting.
 
 The baseline wording is the semantic reference. Emoji and labels belong here
-only — scores are always persisted as integers 1..5 (presentation is separate
-from data). Tone: short, calm, neutral, no psychological interpretation.
+only — scores are always persisted as integers 1..5 and outcomes as the
+canonical ``done`` / ``partial`` / ``not_done`` strings (presentation is
+separate from data). Tone: short, calm, neutral, no psychological
+interpretation of what was or was not achieved.
 """
 
 from __future__ import annotations
@@ -11,6 +13,12 @@ import html
 from datetime import date
 
 from app.database.models import MorningIntent
+from app.services.morning_service import (
+    OUTCOME_DONE,
+    OUTCOME_NOT_DONE,
+    OUTCOME_PARTIAL,
+    MorningLock,
+)
 
 _MONTHS_RU = [
     "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -56,22 +64,80 @@ MORNING_RECORDED_EMPTY = "☀️ Утренний фокус не записан
 INTENTION_TOO_LONG = "Слишком длинно. Напиши короче — максимум 1000 символов."
 INTENTION_EMPTY = "Напиши хотя бы одно главное дело или фокус дня."
 
+# v1.2: the morning record is frozen once its evening closure has started.
+MORNING_LOCKED_OUTCOME = (
+    "Утренний фокус уже зафиксирован — вечерний итог для этого дня начат."
+)
+MORNING_LOCKED_FILLED = "Утренний фокус уже зафиксирован — итог этого дня уже заполнен."
+# A filled day that never had a morning plan: claiming one "is already fixed"
+# would describe something that does not exist, so this says the real rule.
+MORNING_LOCKED_DAY_OVER = (
+    "Итог этого дня уже заполнен — утренний фокус для него уже не добавить."
+)
 
-def intention_lines(main: str | None, secondary: str | None) -> list[str]:
+
+def morning_locked_message(lock: MorningLock | None, *, has_record: bool = True) -> str:
+    """Neutral explanation of why the morning cannot be written right now.
+    ``has_record`` is the difference between freezing a plan the user made and
+    refusing to invent one after their evening was closed."""
+    if lock is MorningLock.DAY_FILLED:
+        return MORNING_LOCKED_FILLED if has_record else MORNING_LOCKED_DAY_OVER
+    return MORNING_LOCKED_OUTCOME
+
+
+# --- Evening outcomes (v1.2 "close the loop") --------------------------------
+# Labels for the three canonical outcomes, in button order. ``partial`` cannot
+# be expressed as a boolean, which is why the vocabulary has three members.
+OUTCOME_LABEL: dict[str, str] = {
+    OUTCOME_DONE: "✅ Да",
+    OUTCOME_PARTIAL: "➗ Частично",
+    OUTCOME_NOT_DONE: "❌ Нет",
+}
+
+
+def outcome_label(outcome: str | None) -> str | None:
+    """Presented form of a stored outcome; None (not asked yet) renders nothing
+    rather than an alarming 'NULL' / 'not filled' line."""
+    return OUTCOME_LABEL[outcome] if outcome else None
+
+
+def intention_lines(
+    main: str | None,
+    secondary: str | None,
+    *,
+    main_outcome: str | None = None,
+    secondary_outcome: str | None = None,
+) -> list[str]:
     """Shared morning block renderer — one implementation for /morning, the
-    evening header, /today and the completion message. User text is escaped
+    evening questions, /today and the completion message. User text is escaped
     because messages are sent with ParseMode.HTML; an absent secondary
-    intention simply omits its line."""
+    intention simply omits its line, and an outcome that has not been recorded
+    yet omits its «Результат» line."""
     lines = []
     if main is not None:
         lines.append(f"🎯 Главное: {html.escape(main)}")
+        if (label := outcome_label(main_outcome)) is not None:
+            lines.append(f"Результат: {label}")
     if secondary:
         lines.append(f"○ Ещё: {html.escape(secondary)}")
+        if (label := outcome_label(secondary_outcome)) is not None:
+            lines.append(f"Результат: {label}")
     return lines
 
 
-def morning_record_message(main: str | None, secondary: str | None) -> str:
-    return "\n".join([MORNING_EMPTY_TODAY, "", *intention_lines(main, secondary)])
+def _result_lines(intent: MorningIntent | None) -> list[str]:
+    if intent is None:
+        return []
+    return intention_lines(
+        intent.main_intention,
+        intent.secondary_intention,
+        main_outcome=intent.main_outcome,
+        secondary_outcome=intent.secondary_outcome,
+    )
+
+
+def morning_record_message(intent: MorningIntent) -> str:
+    return "\n".join([MORNING_EMPTY_TODAY, "", *_result_lines(intent)])
 
 
 MORNING_DONE_HEADER = "✅ <b>Фокус дня сохранён</b>"
@@ -96,33 +162,47 @@ Q_REFLECTION_TEXT = (
 
 ALREADY_FILLED = "Ты уже заполнял сегодняшний итог."
 
+# --- Evening questions (v1.2 loop closure, then the v1 ratings) --------------
+Q_OUTCOME = "<b>Получилось?</b>"
+NOW_ABOUT_DAY = "Теперь про день в целом."
 
-def evening_header(main_intention: str | None = None, secondary_intention: str | None = None) -> str:
-    """Opening message of the evening flow — shared by the scheduled prompt,
-    /checkin, the main menu and editing. With a morning intent it echoes the
-    intention back; without one it stays exactly the neutral v1 header (no
-    negative reminder about not having written anything)."""
-    if main_intention is None:
-        return CHECKIN_HEADER
+
+def q_main_outcome(main_intention: str) -> str:
+    """Step A — close the main intention. The text is quoted back so the user
+    answers about what they actually planned this morning."""
     return "\n".join(
         [
             CHECKIN_SECTION,
             "",
-            "Утром ты планировал:",
+            "🎯 <b>Главное сегодня:</b>",
+            html.escape(main_intention),
             "",
-            *intention_lines(main_intention, secondary_intention),
-            "",
-            "Как в целом прошёл твой день?",
+            Q_OUTCOME,
         ]
     )
 
 
-def evening_header_for(intent: MorningIntent | None) -> str:
-    """Opening message of the evening flow. One implementation shared by the
-    scheduled prompt (notifications), /checkin, the main menu and editing."""
+def q_secondary_outcome(secondary_intention: str) -> str:
+    """Step B — close the secondary field as one whole. A user who wrote
+    «зал, заказать страховку» answers once, with «Частично» when only one of
+    the two happened; this is intentionally not a task list."""
+    return "\n".join(
+        [
+            "○ <b>Ещё хотел успеть:</b>",
+            html.escape(secondary_intention),
+            "",
+            Q_OUTCOME,
+        ]
+    )
+
+
+def evening_day_prompt(intent: MorningIntent | None) -> str:
+    """Step C — the day ratings. Without a morning intent this is exactly the
+    v1 header (no negative reminder about not having written anything); with
+    one it is the same question, reached after the outcomes were closed."""
     if intent is None:
         return CHECKIN_HEADER
-    return evening_header(intent.main_intention, intent.secondary_intention)
+    return f"{CHECKIN_SECTION}\n\n{NOW_ABOUT_DAY}\n\n{Q_DAY}"
 
 
 def done_message(day: int, mood: int, energy: int) -> str:
@@ -145,14 +225,14 @@ def today_message(
     mood: int | None,
     energy: int | None,
     reflection: str | None,
-    morning_main: str | None = None,
-    morning_secondary: str | None = None,
+    intent: MorningIntent | None = None,
 ) -> str:
-    """Unified daily snapshot: morning block + evening block, each with a
-    neutral empty state. Supports all four combinations."""
+    """Unified daily snapshot: morning block (with any evening outcomes
+    already recorded against it) + evening block, each with a neutral empty
+    state. Supports all four morning/evening existence combinations."""
     lines = [f"📅 <b>{ru_date(entry_day)}</b>", "", "☀️ <b>Утро</b>", ""]
-    if morning_main is not None:
-        lines += intention_lines(morning_main, morning_secondary)
+    if intent is not None:
+        lines += _result_lines(intent)
     else:
         lines.append(MORNING_RECORDED_EMPTY)
     lines += ["", "🌙 <b>Итоги</b>", ""]

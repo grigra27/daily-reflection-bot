@@ -1,12 +1,15 @@
-"""CSV export (baseline sections 23-24, v1.1 unified contract).
+"""CSV export (baseline sections 23-24, v1.1 unified contract, v1.2 outcomes).
 
 One row = one calendar date, unioning that user's MorningIntent and DailyEntry
 rows: morning-only, evening-only and both-date rows all appear, with empty
-cells on the missing side. Produces UTF-8 (with BOM so Excel renders Russian
-text correctly) CSV using the standard ``csv`` module, which handles commas
-and newlines inside texts via proper quoting. Exports contain only the
-requesting user's rows. Temporary files are avoided entirely — the CSV is
-built in memory and sent as a Telegram upload, so nothing accumulates on disk.
+cells on the missing side. Outcomes are exported as the stored canonical
+values (``done`` / ``partial`` / ``not_done``) rather than their emoji labels,
+and a day closed before v1.2 simply has empty outcome cells. Produces UTF-8
+(with BOM so Excel renders Russian text correctly) CSV using the standard
+``csv`` module, which handles commas and newlines inside texts via proper
+quoting. Exports contain only the requesting user's rows. Temporary files are
+avoided entirely — the CSV is built in memory and sent as a Telegram upload, so
+nothing accumulates on disk.
 """
 
 from __future__ import annotations
@@ -23,7 +26,9 @@ from app.database.repositories import DailyEntryRepository, MorningIntentReposit
 FIELDS = [
     "date",
     "morning_main_intention",
+    "morning_main_outcome",
     "morning_secondary_intention",
+    "morning_secondary_outcome",
     "morning_created_at",
     "day_score",
     "mood_score",
@@ -74,7 +79,9 @@ def build_csv(
             [
                 day.isoformat(),
                 m.main_intention if m else "",
+                (m.main_outcome or "") if m else "",
                 (m.secondary_intention or "") if m else "",
+                (m.secondary_outcome or "") if m else "",
                 _fmt_dt(m.created_at) if m else "",
                 e.day_score if e else "",
                 e.mood_score if e else "",

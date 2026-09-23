@@ -97,6 +97,12 @@ class FakeState:
     async def set_state(self, state) -> None:
         self.state = state
 
+    async def get_state(self):
+        # aiogram's storage keeps a State as its raw "Group:name" string, which
+        # is what handlers compare against; the object itself stays readable on
+        # .state so tests can assert on it directly.
+        return getattr(self.state, "state", self.state)
+
     async def clear(self) -> None:
         self.data = {}
         self.state = None

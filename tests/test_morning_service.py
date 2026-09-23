@@ -1,4 +1,4 @@
-"""MorningIntent repository + service tests (v1.1, spec section 27)."""
+"""MorningIntent repository + service tests (v1.1, spec section 27; v1.2 outcomes)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.database.models import MorningIntent, User
+from app.database.models import DailyEntry, MorningIntent, User
 from app.database.repositories import MorningIntentRepository
 from app.services import morning_service
 from app.services.morning_service import MorningValidationError
@@ -188,3 +188,287 @@ def test_dates_use_user_reflection_day(session: Session) -> None:
     assert intent.intention_date == reflection_day("UTC")
     assert morning_service.has_intent_today(session, u)
     assert morning_service.get_intent(session, u) is not None
+
+
+# --------------------------------------------------------------------------
+# v1.2 outcome persistence: canonical vocabulary and narrow writes
+# --------------------------------------------------------------------------
+#: A fixed Reflection Day for the pure (no-database) rules below.
+ANY_DAY = date(2026, 9, 19)
+
+
+def test_outcome_vocabulary_is_exactly_three() -> None:
+    assert morning_service.OUTCOMES == ("done", "partial", "not_done")
+    assert morning_service.OUTCOME_FIELDS == ("main", "secondary")
+
+
+def test_record_outcome_accepts_only_the_three_canonical_values(
+    session: Session, user: User
+) -> None:
+    morning_service.save_main_intention(session, user, "A")
+    for bad in ("перенёс", "carry_over", "yes", "DONE", "", "true", "4"):
+        with pytest.raises(MorningValidationError):
+            morning_service.record_outcome(
+                session, user, outcome_field="main", outcome=bad
+            )
+    row = morning_service.get_intent(session, user)
+    assert row is not None and row.main_outcome is None  # nothing half-written
+    for good in morning_service.OUTCOMES:
+        row = morning_service.record_outcome(
+            session, user, outcome_field="main", outcome=good
+        )
+        assert row.main_outcome == good
+
+
+def test_record_outcome_rejects_unknown_field(session: Session, user: User) -> None:
+    morning_service.save_main_intention(session, user, "A")
+    with pytest.raises(MorningValidationError):
+        morning_service.record_outcome(
+            session, user, outcome_field="third", outcome="done"
+        )
+
+
+def test_record_outcome_writes_only_its_own_column(session: Session, user: User) -> None:
+    morning_service.save_main_intention(session, user, "A")
+    morning_service.set_secondary(session, user, "S")
+    before = morning_service.get_intent(session, user)
+    assert before is not None
+    before_created, before_id = before.created_at, before.id
+
+    main = morning_service.record_outcome(
+        session, user, outcome_field="main", outcome="partial"
+    )
+    assert (main.main_outcome, main.secondary_outcome) == ("partial", None)
+    # The intention texts themselves are never touched by an outcome tap.
+    assert (main.main_intention, main.secondary_intention) == ("A", "S")
+    assert main.id == before_id  # the same row, not a new one
+
+    both = morning_service.record_outcome(
+        session, user, outcome_field="secondary", outcome="not_done"
+    )
+    assert (both.main_outcome, both.secondary_outcome) == ("partial", "not_done")
+    assert both.created_at == before_created
+
+
+def test_record_outcome_is_idempotent_and_creates_no_row(session: Session, user: User) -> None:
+    morning_service.save_main_intention(session, user, "A")
+    for _ in range(3):
+        row = morning_service.record_outcome(
+            session, user, outcome_field="main", outcome="done"
+        )
+        assert row.main_outcome == "done"
+    assert session.query(MorningIntent).count() == 1
+
+
+def test_record_outcome_requires_an_existing_morning_row(session: Session, user: User) -> None:
+    with pytest.raises(MorningValidationError):
+        morning_service.record_outcome(
+            session, user, outcome_field="main", outcome="done"
+        )
+    assert session.query(MorningIntent).count() == 0
+
+
+def test_secondary_outcome_needs_a_secondary_intention(session: Session, user: User) -> None:
+    morning_service.save_main_intention(session, user, "A")
+    with pytest.raises(MorningValidationError):
+        morning_service.record_outcome(
+            session, user, outcome_field="secondary", outcome="done"
+        )
+    row = morning_service.get_intent(session, user)
+    assert row is not None and row.secondary_outcome is None
+
+
+def test_record_outcome_is_independent_of_the_daily_entry(session: Session, user: User) -> None:
+    # An outcome says nothing about the day scores: they are separate facts and
+    # neither one is derived from the other.
+    morning_service.save_main_intention(session, user, "A")
+    morning_service.record_outcome(session, user, outcome_field="main", outcome="done")
+    assert session.query(DailyEntry).count() == 0
+
+
+def test_only_an_explicit_edit_may_change_an_outcome_of_a_filled_day(
+    session: Session, user: User
+) -> None:
+    # Review P0: once the day entry exists its evening is closed, so an outcome
+    # may only be rewritten by the flow the user opened as an edit. A stale,
+    # replayed or scheduled tap gets nothing but a refusal.
+    morning_service.save_main_intention(session, user, "A")
+    morning_service.set_secondary(session, user, "S")
+    morning_service.record_outcome(session, user, outcome_field="main", outcome="done")
+    session.add(
+        DailyEntry(
+            user_id=user.id,
+            entry_date=reflection_day(user.timezone),
+            day_score=4,
+            mood_score=4,
+            energy_score=4,
+        )
+    )
+    session.commit()
+
+    with pytest.raises(morning_service.MorningLockedError) as exc:
+        morning_service.record_outcome(
+            session, user, outcome_field="main", outcome="not_done"
+        )
+    assert exc.value.lock is morning_service.MorningLock.DAY_FILLED
+    row = morning_service.get_intent(session, user)
+    assert row is not None and row.main_outcome == "done"  # nothing half-written
+    assert session.query(DailyEntry).count() == 1  # and no second entry
+
+    edited = morning_service.record_outcome(
+        session,
+        user,
+        outcome_field="main",
+        outcome="not_done",
+        allow_filled_day_edit=True,
+    )
+    assert (edited.main_outcome, edited.secondary_outcome) == ("not_done", None)
+    assert (edited.main_intention, edited.secondary_intention) == ("A", "S")
+    assert session.query(DailyEntry).count() == 1
+    assert session.query(MorningIntent).count() == 1
+
+
+# --------------------------------------------------------------------------
+# v1.2 morning lock
+# --------------------------------------------------------------------------
+def _row(**kwargs) -> MorningIntent:
+    """A detached row: ``lock_for`` and ``next_evening_step`` are pure rules."""
+    return MorningIntent(user_id=1, intention_date=ANY_DAY, main_intention="A", **kwargs)
+
+
+def test_lock_rule_matches_the_documented_states() -> None:
+    Lock = morning_service.MorningLock
+    entry = DailyEntry(
+        user_id=1, entry_date=ANY_DAY, day_score=4, mood_score=4, energy_score=4
+    )
+    assert morning_service.lock_for(None, None) is None
+    assert morning_service.lock_for(_row(), None) is None
+    assert morning_service.lock_for(_row(main_outcome="partial"), None) is Lock.OUTCOME_RECORDED
+    assert (
+        morning_service.lock_for(_row(secondary_outcome="done"), None) is Lock.OUTCOME_RECORDED
+    )
+    # Historical pre-v1.2 shape: an entry exists while both outcomes are NULL.
+    assert morning_service.lock_for(_row(), entry) is Lock.DAY_FILLED
+    # The filled-day reason wins when both apply — it is the more useful message.
+    assert morning_service.lock_for(_row(main_outcome="done"), entry) is Lock.DAY_FILLED
+    # A filled evening locks the morning even with no morning row at all: the
+    # day is over, so a plan written now would be invented after the fact.
+    assert morning_service.lock_for(None, entry) is Lock.DAY_FILLED
+
+
+def test_service_refuses_morning_text_writes_once_an_outcome_exists(
+    session: Session, user: User
+) -> None:
+    morning_service.save_main_intention(session, user, "A")
+    morning_service.set_secondary(session, user, "S")
+    morning_service.record_outcome(session, user, outcome_field="main", outcome="done")
+    for call in (
+        lambda: morning_service.save_main_intention(session, user, "переписано"),
+        lambda: morning_service.set_secondary(session, user, "переписано"),
+    ):
+        with pytest.raises(morning_service.MorningLockedError) as exc:
+            call()
+        assert exc.value.lock is morning_service.MorningLock.OUTCOME_RECORDED
+    row = morning_service.get_intent(session, user)
+    assert row is not None
+    assert (row.main_intention, row.secondary_intention) == ("A", "S")
+    assert session.query(MorningIntent).count() == 1
+
+
+def test_service_refuses_morning_text_writes_for_a_filled_historical_day(
+    session: Session, user: User
+) -> None:
+    # A pre-v1.2 day: intention + entry, outcomes never introduced.
+    morning_service.save_main_intention(session, user, "A")
+    session.add(
+        DailyEntry(
+            user_id=user.id,
+            entry_date=reflection_day(user.timezone),
+            day_score=4,
+            mood_score=4,
+            energy_score=4,
+        )
+    )
+    session.commit()
+    with pytest.raises(morning_service.MorningLockedError) as exc:
+        morning_service.save_main_intention(session, user, "переписано")
+    assert exc.value.lock is morning_service.MorningLock.DAY_FILLED
+
+
+def test_outcome_recording_is_still_allowed_while_locked(session: Session, user: User) -> None:
+    # The lock covers the intention *texts*; the evening must still be able to
+    # close the second field after the first one was answered.
+    morning_service.save_main_intention(session, user, "A")
+    morning_service.set_secondary(session, user, "S")
+    morning_service.record_outcome(session, user, outcome_field="main", outcome="done")
+    row = morning_service.record_outcome(
+        session, user, outcome_field="secondary", outcome="partial"
+    )
+    assert row.secondary_outcome == "partial"
+
+
+def test_get_lock_uses_the_reflection_day(session: Session) -> None:
+    u = _mk_user(session)
+    morning_service.save_main_intention(session, u, "A")
+    morning_service.record_outcome(session, u, outcome_field="main", outcome="done")
+    assert morning_service.get_lock(session, u) is morning_service.MorningLock.OUTCOME_RECORDED
+    # A different Reflection Day is a different record and stays editable.
+    assert morning_service.get_lock(session, u, intention_date=ANY_DAY) is None
+
+
+# --------------------------------------------------------------------------
+# v1.2: the shared evening step rule (spec 10, 20, 23)
+# --------------------------------------------------------------------------
+def test_next_evening_step_matrix() -> None:
+    Step = morning_service.EveningStep
+    assert morning_service.next_evening_step(None) is Step.DAY_SCORE
+    assert morning_service.next_evening_step(_row()) is Step.MAIN_OUTCOME
+    # No secondary intention -> nothing left to ask once main is answered.
+    assert morning_service.next_evening_step(_row(main_outcome="done")) is Step.DAY_SCORE
+    assert morning_service.next_evening_step(_row(secondary_intention="S")) is Step.MAIN_OUTCOME
+    assert (
+        morning_service.next_evening_step(_row(secondary_intention="S", main_outcome="partial"))
+        is Step.SECONDARY_OUTCOME
+    )
+    assert (
+        morning_service.next_evening_step(
+            _row(secondary_intention="S", main_outcome="partial", secondary_outcome="done")
+        )
+        is Step.DAY_SCORE
+    )
+
+
+def test_edit_mode_rewalks_both_questions_whatever_is_stored() -> None:
+    # act:edit on a filled day re-walks the evening (spec 11)...
+    Step = morning_service.EveningStep
+    closed = _row(secondary_intention="S", main_outcome="done", secondary_outcome="done")
+    assert morning_service.next_evening_step(closed) is Step.DAY_SCORE
+    assert morning_service.next_evening_step(closed, edit_mode=True) is Step.MAIN_OUTCOME
+    # ...so after main the SECOND question comes next even though it already
+    # has a stored answer: progression follows the tap, not the columns.
+    assert (
+        morning_service.next_evening_step(closed, edit_mode=True, after_outcome_field="main")
+        is Step.SECONDARY_OUTCOME
+    )
+    assert (
+        morning_service.next_evening_step(closed, edit_mode=True, after_outcome_field="secondary")
+        is Step.DAY_SCORE
+    )
+    # A plan with only the main field goes straight from main to the ratings.
+    main_only = _row(main_outcome="done")
+    assert (
+        morning_service.next_evening_step(main_only, edit_mode=True, after_outcome_field="main")
+        is Step.DAY_SCORE
+    )
+    # A day with no morning intention has nothing to rewind to.
+    assert morning_service.next_evening_step(None, edit_mode=True) is Step.DAY_SCORE
+
+
+def test_a_resumed_flow_never_repeats_an_answered_question() -> None:
+    # Without edit_mode the stored answers decide, so a resume — or a scheduled
+    # prompt whose button gets tapped again — cannot loop back into questions
+    # the evening has already closed.
+    Step = morning_service.EveningStep
+    closed = _row(secondary_intention="S", main_outcome="done", secondary_outcome="done")
+    assert morning_service.next_evening_step(closed) is Step.DAY_SCORE
+    assert morning_service.next_evening_step(closed, after_outcome_field="main") is Step.DAY_SCORE

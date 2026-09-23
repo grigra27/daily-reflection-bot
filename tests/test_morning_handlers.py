@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.bot import texts
 from app.bot.handlers import daily, morning
-from app.bot.states import MorningStates
+from app.bot.states import CheckinStates, MorningStates
 from app.database.models import MorningIntent
 from app.database.repositories import UserRepository
 from app.database.session import session_scope
@@ -207,7 +207,7 @@ async def test_explicit_evening_start_clears_stale_morning_fsm(app_runtime) -> N
     state.state = MorningStates.waiting_secondary
     await daily.cmd_checkin(user_message(111, "/checkin"), state)
     assert state.cleared >= 1
-    assert state.state is None
+    assert state.state == CheckinStates.waiting_day  # the day question, not no flow
     # v1.1.1: only the frozen target Reflection Day survives the clear.
     assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
 

@@ -78,6 +78,11 @@ class MorningIntent(Base):
     intention_date: Mapped[date] = mapped_column(Date, nullable=False)
     main_intention: Mapped[str] = mapped_column(Text, nullable=False)
     secondary_intention: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # v1.2 evening closure of the morning intentions: NULL means "not asked
+    # yet", so historical (pre-v1.2) rows and partially completed evenings are
+    # both representable. Values are the application-level outcome vocabulary.
+    main_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    secondary_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

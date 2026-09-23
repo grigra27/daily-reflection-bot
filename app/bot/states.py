@@ -1,7 +1,9 @@
-"""FSM state definitions (baseline section 30, v1.1 morning flow).
+"""FSM state definitions (baseline section 30, v1.1 morning flow, v1.2 loop).
 
-Daily check-in:  IDLE -> WAITING_DAY_SCORE -> WAITING_MOOD_SCORE ->
-WAITING_ENERGY_SCORE -> ASK_REFLECTION -> WAITING_REFLECTION_TEXT -> COMPLETE
+Daily check-in:  IDLE -> [WAITING_MAIN_OUTCOME -> WAITING_SECONDARY_OUTCOME] ->
+WAITING_DAY -> WAITING_MOOD -> WAITING_ENERGY ->
+ASK_REFLECTION -> WAITING_REFLECTION_TEXT -> COMPLETE
+(the two outcome states only exist when a MorningIntent was written that day)
 Morning:         IDLE -> WAITING_MAIN -> WAITING_SECONDARY -> COMPLETE
 Weekly:          WEEKLY_IDLE -> WAITING_BEST_EVENT -> WAITING_ENERGY_DRAINER ->
 WAITING_WANT_MORE -> COMPLETE
@@ -13,6 +15,9 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class CheckinStates(StatesGroup):
+    # v1.2: closing the morning intentions, before the day ratings.
+    waiting_main_outcome = State()
+    waiting_secondary_outcome = State()
     waiting_day = State()
     waiting_mood = State()
     waiting_energy = State()

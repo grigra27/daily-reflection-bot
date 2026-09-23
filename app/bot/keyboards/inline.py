@@ -1,12 +1,14 @@
 """Inline keyboards for the bot.
 
 Emoji/labels live here (presentation). Callback data is intentionally compact
-and encodes only the integer score, never a display value.
+and encodes only system-controlled values — an integer score or a canonical
+outcome — never a display value or any user text.
 """
 
 from __future__ import annotations
 
 from datetime import date
+from enum import Enum, auto
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -15,16 +17,47 @@ from app.bot import texts
 SCORES = (1, 2, 3, 4, 5)
 
 
-def _score_row(field: str, emoji: dict[int, str]) -> list[InlineKeyboardButton]:
+def _dated(callback_data: str, target_date: date | None) -> str:
+    """Bake the target Reflection Day into a callback (v1.2).
+
+    A scheduled Telegram message never creates FSM state, and MemoryStorage can
+    be lost to a restart — the date carried by the button itself keeps the tap
+    bound to the day it was written for, even after the 05:00 rollover. With no
+    date the legacy form is produced, so messages sent before the upgrade stay
+    tappable.
+    """
+    return callback_data if target_date is None else f"{callback_data}:{target_date.isoformat()}"
+
+
+def _score_row(
+    field: str, emoji: dict[int, str], target_date: date | None = None
+) -> list[InlineKeyboardButton]:
     return [
-        InlineKeyboardButton(text=f"{emoji[v]} {v}", callback_data=f"ci:{field}:{v}")
+        InlineKeyboardButton(
+            text=f"{emoji[v]} {v}", callback_data=_dated(f"ci:{field}:{v}", target_date)
+        )
         for v in SCORES
     ]
 
 
-def day_keyboard() -> InlineKeyboardMarkup:
+def day_keyboard(target_date: date | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[_score_row("day", texts.DAY_EMOJI)]
+        inline_keyboard=[_score_row("day", texts.DAY_EMOJI, target_date)]
+    )
+
+
+def outcome_keyboard(field: str, target_date: date | None = None) -> InlineKeyboardMarkup:
+    """The three evening outcomes for one morning intention (``field`` is
+    "main" or "secondary") — e.g. ``ci:out:main:partial:2026-09-23``."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=label, callback_data=_dated(f"ci:out:{field}:{value}", target_date)
+                )
+                for value, label in texts.OUTCOME_LABEL.items()
+            ]
+        ]
     )
 
 
@@ -60,19 +93,34 @@ def skip_keyboard(callback_prefix: str) -> InlineKeyboardMarkup:
     )
 
 
-def today_actions_keyboard(*, has_morning: bool, has_evening: bool) -> InlineKeyboardMarkup:
+class MorningAction(Enum):
+    """What /today may legitimately offer for the morning block (v1.2).
+
+    Derived from the morning lock rather than from "does a row exist", so the
+    keyboard can never offer an edit or a retroactive plan the service would
+    refuse. ``None`` (no member) means neither button is shown.
+    """
+
+    EDIT = auto()
+    CREATE = auto()
+
+
+def today_actions_keyboard(
+    *, morning_action: MorningAction | None, has_evening: bool
+) -> InlineKeyboardMarkup:
     """Contextual /today actions — morning and evening, current date only."""
-    morning = (
-        InlineKeyboardButton(text="✏️ Изменить утро", callback_data="mrn:edit")
-        if has_morning
-        else InlineKeyboardButton(text="☀️ Записать утро", callback_data="mrn:start")
-    )
+    row: list[InlineKeyboardButton] = []
+    if morning_action is MorningAction.EDIT:
+        row.append(InlineKeyboardButton(text="✏️ Изменить утро", callback_data="mrn:edit"))
+    elif morning_action is MorningAction.CREATE:
+        row.append(InlineKeyboardButton(text="☀️ Записать утро", callback_data="mrn:start"))
     evening = (
         InlineKeyboardButton(text="✏️ Изменить итог", callback_data="act:edit")
         if has_evening
         else InlineKeyboardButton(text="🌙 Заполнить итог", callback_data="act:checkin")
     )
-    return InlineKeyboardMarkup(inline_keyboard=[[morning, evening]])
+    row.append(evening)
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
 def morning_prompt_keyboard() -> InlineKeyboardMarkup:

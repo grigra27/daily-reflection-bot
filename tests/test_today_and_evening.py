@@ -1,4 +1,4 @@
-"""Unified /today snapshot + evening morning-context tests (v1.1, spec 27)."""
+"""Unified /today snapshot + evening flow entry tests (v1.1, spec 27; v1.2 loop closure)."""
 
 from __future__ import annotations
 
@@ -40,11 +40,28 @@ async def _run_score_steps(state: FakeState) -> None:
     await daily.step_energy(callback("ci:energy:2", message=bot_message()), state)
 
 
-async def _write_evening(tg_id: int = 111) -> None:
+async def _closed_loop_flow(tg_id: int = 111) -> FakeState:
+    """/checkin with both closure questions answered, i.e. a flow standing on
+    the day question — the only place a day rating may be tapped from while a
+    morning intention is still owed (v1.2)."""
+    today = reflection_day("Europe/Moscow").isoformat()
     state = FakeState()
-    await _run_score_steps(state)
+    await daily.cmd_checkin(user_message(tg_id, "/checkin"), state)
+    await daily.step_outcome(
+        callback(f"ci:out:main:done:{today}", user_id=tg_id, message=bot_message()), state
+    )
+    await daily.step_outcome(
+        callback(f"ci:out:secondary:partial:{today}", user_id=tg_id, message=bot_message()), state
+    )
+    assert state.state == CheckinStates.waiting_day
+    return state
+
+
+async def _write_evening(tg_id: int = 111, state: FakeState | None = None) -> None:
+    flow = state if state is not None else FakeState()
+    await _run_score_steps(flow)
     await daily.skip_reflection(
-        callback("ci:ref:no", user_id=tg_id, message=bot_message()), state
+        callback("ci:ref:no", user_id=tg_id, message=bot_message()), flow
     )
 
 
@@ -53,7 +70,8 @@ async def _write_evening(tg_id: int = 111) -> None:
 # --------------------------------------------------------------------------
 async def test_today_both_morning_and_evening(app_runtime) -> None:  # noqa: F811
     await _write_morning()
-    await _write_evening()
+    # A day with a morning plan is rated through the evening that closed it.
+    await _write_evening(state=await _closed_loop_flow())
     msg = user_message(111, "/today")
     await daily.cmd_today(msg)
     rendered = msg.answers[-1]
@@ -93,17 +111,22 @@ async def test_today_neither(app_runtime) -> None:  # noqa: F811
 
 
 # --------------------------------------------------------------------------
-# Evening flow: morning context, existing semantics unchanged
+# Evening flow entry: step A replaces the v1.1 morning-context header (v1.2)
 # --------------------------------------------------------------------------
-async def test_evening_header_shows_morning_intention(app_runtime) -> None:  # noqa: F811
+async def test_evening_opens_with_the_main_outcome_question(app_runtime) -> None:  # noqa: F811
+    # v1.2 step A: an intention exists, so the evening closes the loop before
+    # asking for the day scores.
     await _write_morning(secondary="зал")
     msg = user_message(111, "/checkin")
-    await daily.cmd_checkin(msg, FakeState())
+    state = FakeState()
+    await daily.cmd_checkin(msg, state)
     header = msg.answers[-1]
-    assert "Утром ты планировал:" in header
-    assert "🎯 Главное: backup Flow" in header
-    assert "○ Ещё: зал" in header
-    assert "Как в целом прошёл твой день?" in header
+    assert "🎯 <b>Главное сегодня:</b>" in header
+    assert "backup Flow" in header
+    assert texts.Q_OUTCOME in header
+    assert "Как в целом прошёл твой день?" not in header
+    assert state.state == CheckinStates.waiting_main_outcome
+    assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
 
 
 async def test_evening_header_without_morning_stays_v1_neutral(app_runtime) -> None:  # noqa: F811
@@ -171,9 +194,9 @@ async def test_act_checkin_callback_starts_evening_flow_for_tapper(
     target = bot_message()
     await daily.cb_start_checkin(callback("act:checkin", user_id=111, message=target), FakeState())
     header = target.answers[-1]
-    assert "Утром ты планировал:" in header
-    assert "🎯 Главное: backup Flow" in header
-    assert "Как в целом прошёл твой день?" in header
+    assert "🎯 <b>Главное сегодня:</b>" in header
+    assert "backup Flow" in header
+    assert texts.Q_OUTCOME in header
     _assert_bot_never_becomes_a_user(session_factory)
 
 
@@ -187,8 +210,8 @@ async def test_act_edit_callback_starts_edit_flow_when_entry_exists(
     # Editing must reach the first question, not bounce back to "already filled".
     assert texts.ALREADY_FILLED not in target.answers
     header = target.answers[-1]
-    assert "Утром ты планировал:" in header
-    assert "Как в целом прошёл твой день?" in header
+    assert "🎯 <b>Главное сегодня:</b>" in header
+    assert texts.Q_OUTCOME in header
     _assert_bot_never_becomes_a_user(session_factory)
 
 
@@ -210,7 +233,7 @@ async def test_act_checkin_callback_clears_stale_evening_fsm(
     state = FakeState({"day_score": 5})
     state.state = CheckinStates.waiting_mood
     await daily.cb_start_checkin(callback("act:checkin", user_id=111), state)
-    assert state.state is None
+    assert state.state == CheckinStates.waiting_day
     # v1.1.1: stale answers are gone; the fresh flow carries only the frozen
     # target Reflection Day.
     assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
@@ -224,7 +247,7 @@ async def test_act_edit_callback_clears_stale_fsm_before_restarting(
     state = FakeState({"main": "leftover"})
     state.state = CheckinStates.waiting_energy
     await daily.cb_start_checkin(callback("act:edit", user_id=111, message=bot_message()), state)
-    assert state.state is None
+    assert state.state == CheckinStates.waiting_day
     assert state.data == {"target_date": reflection_day("Europe/Moscow").isoformat()}
     _assert_bot_never_becomes_a_user(session_factory)
 
