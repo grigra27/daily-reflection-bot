@@ -2,6 +2,7 @@
 
 from app.bot.keyboards import reply
 from app.bot.keyboards.inline import (
+    MorningAction,
     day_keyboard,
     energy_keyboard,
     export_keyboard,
@@ -20,6 +21,7 @@ from app.bot.keyboards.inline import (
 )
 
 __all__ = [
+    "MorningAction",
     "day_keyboard",
     "energy_keyboard",
     "export_keyboard",

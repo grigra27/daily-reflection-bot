@@ -286,6 +286,48 @@ def test_record_outcome_is_independent_of_the_daily_entry(session: Session, user
     assert session.query(DailyEntry).count() == 0
 
 
+def test_only_an_explicit_edit_may_change_an_outcome_of_a_filled_day(
+    session: Session, user: User
+) -> None:
+    # Review P0: once the day entry exists its evening is closed, so an outcome
+    # may only be rewritten by the flow the user opened as an edit. A stale,
+    # replayed or scheduled tap gets nothing but a refusal.
+    morning_service.save_main_intention(session, user, "A")
+    morning_service.set_secondary(session, user, "S")
+    morning_service.record_outcome(session, user, outcome_field="main", outcome="done")
+    session.add(
+        DailyEntry(
+            user_id=user.id,
+            entry_date=reflection_day(user.timezone),
+            day_score=4,
+            mood_score=4,
+            energy_score=4,
+        )
+    )
+    session.commit()
+
+    with pytest.raises(morning_service.MorningLockedError) as exc:
+        morning_service.record_outcome(
+            session, user, outcome_field="main", outcome="not_done"
+        )
+    assert exc.value.lock is morning_service.MorningLock.DAY_FILLED
+    row = morning_service.get_intent(session, user)
+    assert row is not None and row.main_outcome == "done"  # nothing half-written
+    assert session.query(DailyEntry).count() == 1  # and no second entry
+
+    edited = morning_service.record_outcome(
+        session,
+        user,
+        outcome_field="main",
+        outcome="not_done",
+        allow_filled_day_edit=True,
+    )
+    assert (edited.main_outcome, edited.secondary_outcome) == ("not_done", None)
+    assert (edited.main_intention, edited.secondary_intention) == ("A", "S")
+    assert session.query(DailyEntry).count() == 1
+    assert session.query(MorningIntent).count() == 1
+
+
 # --------------------------------------------------------------------------
 # v1.2 morning lock
 # --------------------------------------------------------------------------
@@ -309,9 +351,9 @@ def test_lock_rule_matches_the_documented_states() -> None:
     assert morning_service.lock_for(_row(), entry) is Lock.DAY_FILLED
     # The filled-day reason wins when both apply — it is the more useful message.
     assert morning_service.lock_for(_row(main_outcome="done"), entry) is Lock.DAY_FILLED
-    # No intention at all: there is no plan that could be rewritten, so nothing
-    # is locked (an evening-only day can still get a morning record).
-    assert morning_service.lock_for(None, entry) is None
+    # A filled evening locks the morning even with no morning row at all: the
+    # day is over, so a plan written now would be invented after the fact.
+    assert morning_service.lock_for(None, entry) is Lock.DAY_FILLED
 
 
 def test_service_refuses_morning_text_writes_once_an_outcome_exists(
@@ -396,11 +438,37 @@ def test_next_evening_step_matrix() -> None:
     )
 
 
-def test_next_evening_step_restart_rewinds_to_the_first_question() -> None:
-    # act:edit on a filled day re-walks every step (spec 11)...
+def test_edit_mode_rewalks_both_questions_whatever_is_stored() -> None:
+    # act:edit on a filled day re-walks the evening (spec 11)...
     Step = morning_service.EveningStep
     closed = _row(secondary_intention="S", main_outcome="done", secondary_outcome="done")
     assert morning_service.next_evening_step(closed) is Step.DAY_SCORE
-    assert morning_service.next_evening_step(closed, restart=True) is Step.MAIN_OUTCOME
-    # ...but a day with no morning intention has nothing to rewind to.
-    assert morning_service.next_evening_step(None, restart=True) is Step.DAY_SCORE
+    assert morning_service.next_evening_step(closed, edit_mode=True) is Step.MAIN_OUTCOME
+    # ...so after main the SECOND question comes next even though it already
+    # has a stored answer: progression follows the tap, not the columns.
+    assert (
+        morning_service.next_evening_step(closed, edit_mode=True, after_outcome_field="main")
+        is Step.SECONDARY_OUTCOME
+    )
+    assert (
+        morning_service.next_evening_step(closed, edit_mode=True, after_outcome_field="secondary")
+        is Step.DAY_SCORE
+    )
+    # A plan with only the main field goes straight from main to the ratings.
+    main_only = _row(main_outcome="done")
+    assert (
+        morning_service.next_evening_step(main_only, edit_mode=True, after_outcome_field="main")
+        is Step.DAY_SCORE
+    )
+    # A day with no morning intention has nothing to rewind to.
+    assert morning_service.next_evening_step(None, edit_mode=True) is Step.DAY_SCORE
+
+
+def test_a_resumed_flow_never_repeats_an_answered_question() -> None:
+    # Without edit_mode the stored answers decide, so a resume — or a scheduled
+    # prompt whose button gets tapped again — cannot loop back into questions
+    # the evening has already closed.
+    Step = morning_service.EveningStep
+    closed = _row(secondary_intention="S", main_outcome="done", secondary_outcome="done")
+    assert morning_service.next_evening_step(closed) is Step.DAY_SCORE
+    assert morning_service.next_evening_step(closed, after_outcome_field="main") is Step.DAY_SCORE

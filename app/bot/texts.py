@@ -69,10 +69,20 @@ MORNING_LOCKED_OUTCOME = (
     "Утренний фокус уже зафиксирован — вечерний итог для этого дня начат."
 )
 MORNING_LOCKED_FILLED = "Утренний фокус уже зафиксирован — итог этого дня уже заполнен."
+# A filled day that never had a morning plan: claiming one "is already fixed"
+# would describe something that does not exist, so this says the real rule.
+MORNING_LOCKED_DAY_OVER = (
+    "Итог этого дня уже заполнен — утренний фокус для него уже не добавить."
+)
 
 
-def morning_locked_message(lock: MorningLock | None) -> str:
-    return MORNING_LOCKED_FILLED if lock is MorningLock.DAY_FILLED else MORNING_LOCKED_OUTCOME
+def morning_locked_message(lock: MorningLock | None, *, has_record: bool = True) -> str:
+    """Neutral explanation of why the morning cannot be written right now.
+    ``has_record`` is the difference between freezing a plan the user made and
+    refusing to invent one after their evening was closed."""
+    if lock is MorningLock.DAY_FILLED:
+        return MORNING_LOCKED_FILLED if has_record else MORNING_LOCKED_DAY_OVER
+    return MORNING_LOCKED_OUTCOME
 
 
 # --- Evening outcomes (v1.2 "close the loop") --------------------------------

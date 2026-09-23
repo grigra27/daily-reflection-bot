@@ -261,26 +261,63 @@ async def test_lock_message_is_neutral(
 
 
 # --------------------------------------------------------------------------
-# A day with an evening but no morning record is still open for planning
+# Review P1: a filled day cannot receive a morning plan after the fact
 # --------------------------------------------------------------------------
-async def test_evening_only_day_still_accepts_a_morning_record(
+async def test_a_filled_day_refuses_a_retroactive_morning_plan(
     app_runtime, session, user, session_factory  # noqa: F811
 ) -> None:
+    # The evening was closed without any morning record (a pre-v1.2 shape, or
+    # simply a day the user only rated). None of the four entry points may
+    # invent a plan for it now.
     session.add(
         DailyEntry(
             user_id=user.id, entry_date=TODAY, day_score=3, mood_score=3, energy_score=3
         )
     )
     session.commit()
+
     state = FakeState()
-    await morning.cmd_morning(user_message(ME, "/morning"), state)
-    assert state.state == MorningStates.waiting_main
-    await morning.submit_main(user_message(ME, "план на вечер"), state)
-    await morning.skip_secondary(
-        callback("mrn:sec:skip", user_id=ME, message=logged_bot_message()), state
-    )
+    view = await show_morning(state)
+    assert texts.MORNING_LOCKED_DAY_OVER in view.answers[-1]
+    assert texts.Q_MAIN_INTENTION not in view.answers  # no prompt to answer
+    assert state.state is None and state.data == {}
+
+    menu = logged_user_message(ME, keyboards.reply.BTN_MORNING)
+    await morning.menu_morning(menu, FakeState())
+    assert texts.MORNING_LOCKED_DAY_OVER in menu.answers[-1]
+
+    target = logged_bot_message()
+    start_state = FakeState()
+    await morning.cb_start_morning(callback("mrn:start", user_id=ME, message=target), start_state)
+    assert texts.MORNING_LOCKED_DAY_OVER in target.answers
+    assert start_state.state is None
+
+    # And the service itself refuses, so no path can talk it into a row.
+    with pytest.raises(morning_service.MorningLockedError) as exc:
+        morning_service.save_main_intention(session, user, "план на вечер")
+    assert exc.value.lock is morning_service.MorningLock.DAY_FILLED
+    assert exc.value.has_record is False  # the message must not claim otherwise
     with session_scope(session_factory) as s:
-        assert s.query(MorningIntent).one().main_intention == "план на вечер"
+        assert s.query(MorningIntent).count() == 0
+        assert s.query(DailyEntry).count() == 1
+
+
+async def test_the_retroactive_refusal_stays_neutral(
+    app_runtime, session, user  # noqa: F811
+) -> None:
+    # No record exists, so saying one "is already fixed" would be false; the
+    # wording states the rule instead, without blaming anyone.
+    session.add(
+        DailyEntry(
+            user_id=user.id, entry_date=TODAY, day_score=3, mood_score=3, energy_score=3
+        )
+    )
+    session.commit()
+    view = await show_morning()
+    assert texts.MORNING_LOCKED_DAY_OVER in view.answers[-1]
+    assert "Утренний фокус уже зафиксирован" not in view.answers[-1]
+    for forbidden in ("ты забыл", "нельзя", "ошибка", "нечего"):
+        assert forbidden not in view.answers[-1]
 
 
 # --------------------------------------------------------------------------

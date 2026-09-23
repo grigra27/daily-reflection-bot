@@ -50,11 +50,14 @@ class MorningLock(Enum):
 
 class MorningLockedError(ValueError):
     """Refusal to overwrite a locked morning record; carries the reason so the
-    presentation layer can pick a neutral message."""
+    presentation layer can pick a neutral message. ``has_record`` distinguishes
+    "your morning is frozen" from "you cannot add a morning any more" — saying
+    the first about a day that never had one would be false."""
 
-    def __init__(self, lock: MorningLock) -> None:
+    def __init__(self, lock: MorningLock, *, has_record: bool = True) -> None:
         super().__init__(lock.name)
         self.lock = lock
+        self.has_record = has_record
 
 
 MISSING_INTENT = "morning intent row is missing"
@@ -79,17 +82,16 @@ def _clean_secondary(text: str | None) -> str | None:
 def lock_for(intent: MorningIntent | None, entry: DailyEntry | None) -> MorningLock | None:
     """Pure form of the lock rule, so both callers and tests can reason about
     historical data: pre-v1.2 days can have an entry while both outcomes are
-    still NULL, and those texts are locked too. The filled-day reason wins when
-    both apply — it is the more useful message for the user.
+    still NULL, and those texts are locked too.
 
-    A day with no MorningIntent row cannot be locked: the rule protects an
-    existing plan from being rewritten after its evening was closed, and there
-    is nothing to rewrite yet.
+    A filled evening locks the morning either way, with or without a morning
+    row: the day is over and its record is complete, so a plan written after
+    the fact would be invented history rather than a plan the user made.
     """
-    if intent is None:
-        return None
     if entry is not None:
         return MorningLock.DAY_FILLED
+    if intent is None:
+        return None
     if intent.main_outcome or intent.secondary_outcome:
         return MorningLock.OUTCOME_RECORDED
     return None
@@ -108,9 +110,10 @@ def get_lock(
 def _refuse_if_locked(session: Session, user: User, target_date: date) -> None:
     """Service-level protection (spec 14): no Telegram UI state is trusted here,
     so a stale callback or a direct call cannot rewrite a closed morning."""
-    lock = get_lock(session, user, intention_date=target_date)
+    intent = MorningIntentRepository(session).get(user.id, target_date)
+    lock = lock_for(intent, DailyEntryRepository(session).get(user.id, target_date))
     if lock is not None:
-        raise MorningLockedError(lock)
+        raise MorningLockedError(lock, has_record=intent is not None)
 
 
 def save_main_intention(
@@ -150,14 +153,20 @@ def record_outcome(
     outcome_field: str,
     outcome: str,
     intention_date: date | None = None,
+    allow_filled_day_edit: bool = False,
 ) -> MorningIntent:
     """Persist one evening outcome the moment it is tapped, before the rest of
     the check-in exists.
 
-    Deliberately independent of ``DailyEntry``: outcomes and day scores are
-    separate facts and neither is derived from the other. Idempotent — a
-    double tap rewrites the same column of the same row, never creating a
-    MorningIntent or touching either intention text.
+    An outcome and a day score are separate facts and neither is derived from
+    the other, but a ``DailyEntry`` does mark the day as finished: once it
+    exists, an outcome may only be changed by an explicit edit that the caller
+    confirms with ``allow_filled_day_edit``. Without that permission a stale,
+    replayed or scheduled button tap is refused, so an evening that was already
+    closed cannot be quietly rewritten from an old message.
+
+    Idempotent — a double tap rewrites the same column of the same row, never
+    creating a MorningIntent or touching either intention text.
     """
     if outcome not in OUTCOMES:
         raise MorningValidationError(f"unknown outcome: {outcome!r}")
@@ -170,6 +179,9 @@ def record_outcome(
         raise MorningValidationError(MISSING_INTENT)
     if outcome_field == OUTCOME_FIELD_SECONDARY and intent.secondary_intention is None:
         raise MorningValidationError(NO_SECONDARY_INTENTION)
+    day_is_filled = DailyEntryRepository(session).get(user.id, target_date) is not None
+    if day_is_filled and not allow_filled_day_edit:
+        raise MorningLockedError(MorningLock.DAY_FILLED)
     if outcome_field == OUTCOME_FIELD_MAIN:
         updated = repo.set_outcome(
             user_id=user.id, intention_date=target_date, main_outcome=outcome
@@ -191,19 +203,36 @@ class EveningStep(Enum):
     DAY_SCORE = auto()
 
 
-def next_evening_step(intent: MorningIntent | None, *, restart: bool = False) -> EveningStep:
-    """The one canonical resume rule, shared by /checkin, an outcome tap and
-    the scheduled evening prompt: ask for the first thing that is still open,
-    never something already answered.
+def next_evening_step(
+    intent: MorningIntent | None,
+    *,
+    edit_mode: bool = False,
+    after_outcome_field: str | None = None,
+) -> EveningStep:
+    """What the evening asks next, shared by /checkin, an outcome tap, the edit
+    flow and the scheduled evening prompt: never something already answered,
+    and never a step skipped.
 
-    ``restart`` is what ``act:edit`` passes — a filled day is re-walked from
-    the main outcome so a mistapped outcome can be corrected. Old outcomes are
-    NOT cleared first: they are simply overwritten by the next tap, so an edit
-    the user abandons leaves the existing data intact.
+    Normally the loop is resumed at its first open question. ``act:edit`` on a
+    filled day is different: the user asked to re-walk the evening, so
+    ``edit_mode`` walks *both* questions in order — main, then secondary if the
+    plan has one — whatever the stored answers say. ``after_outcome_field`` is
+    the question that was just answered: in edit mode progression follows that
+    instead of the stored columns, otherwise re-asking main would immediately
+    declare the day finished and the second field would never be corrected.
+
+    Old outcomes are NOT cleared first: they are simply overwritten by the next
+    tap, so an edit the user abandons leaves the existing data intact.
     """
     if intent is None:
         return EveningStep.DAY_SCORE
-    if restart or intent.main_outcome is None:
+    if edit_mode:
+        if after_outcome_field is None:
+            return EveningStep.MAIN_OUTCOME
+        if after_outcome_field == OUTCOME_FIELD_MAIN and intent.secondary_intention:
+            return EveningStep.SECONDARY_OUTCOME
+        return EveningStep.DAY_SCORE
+    if intent.main_outcome is None:
         return EveningStep.MAIN_OUTCOME
     if intent.secondary_intention and intent.secondary_outcome is None:
         return EveningStep.SECONDARY_OUTCOME

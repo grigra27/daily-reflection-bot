@@ -60,6 +60,27 @@ def _target_date_from_state(data: dict, user) -> date:
     return reflection_day(user.timezone)
 
 
+def _resolve_target_date(fsm_data: dict, parts: list[str], index: int, user) -> date:
+    """The Reflection Day an outcome tap belongs to — the same precedence
+    ``step_day`` applies below: the date frozen at flow start wins over the one
+    baked into the button, because the button may be an old message from another
+    day while the open flow is a conversation about exactly one day. Only when
+    nothing is frozen (a scheduled prompt tapped after a restart wiped
+    MemoryStorage) does the button itself decide, and with neither the v1.1.1
+    clock logic applies.
+    """
+    frozen = fsm_data.get("target_date")
+    baked = _baked_date(parts, index)
+    if frozen:
+        target_date = date.fromisoformat(frozen)
+        if baked is not None and baked != target_date:
+            # Stale UI, not something to bother the user about; only the shape
+            # of the problem is logged, never the callback itself.
+            logger.info("Callback date disagrees with the frozen flow date; callback date ignored")
+        return target_date
+    return baked if baked is not None else reflection_day(user.timezone)
+
+
 async def _handle_checkin_request(
     message: Message,
     state: FSMContext,
@@ -79,7 +100,10 @@ async def _handle_checkin_request(
 
     Which question opens the evening is decided by the shared evening step
     rule (v1.2): outcomes still owed come first, and editing a filled day
-    restarts from the main outcome so a mistapped answer can be corrected.
+    re-walks both of them from the main outcome so a mistapped answer can be
+    corrected. That second behaviour is remembered in the FSM as ``edit_mode``:
+    it is what lets a later tap overwrite an outcome of an already filled day,
+    and it is deliberately *not* something a stale button can claim for itself.
 
     ``message`` is only the Telegram target to reply into; identity always
     comes from the caller: ``message.from_user.id`` for messages,
@@ -94,20 +118,24 @@ async def _handle_checkin_request(
         already_done = (
             checkin_service.get_entry(session, user, entry_date=target_date) is not None
         )
+        edit_mode = already_done and allow_edit
         prompt = (
             None
             if already_done and not allow_edit
             else evening_flow.build_evening_prompt(
                 morning_service.get_intent(session, user, intention_date=target_date),
                 target_date,
-                restart=already_done,
+                edit_mode=edit_mode,
             )
         )
     if prompt is None:
         await message.answer(texts.ALREADY_FILLED, reply_markup=keyboards.filled_choice_keyboard())
     else:
         # Only freeze the date when the flow really starts.
-        await state.update_data(target_date=target_date.isoformat())
+        flow_data = {"target_date": target_date.isoformat()}
+        if edit_mode:
+            flow_data["edit_mode"] = True
+        await state.update_data(**flow_data)
         await state.set_state(prompt.state)
         await message.answer(prompt.text, reply_markup=prompt.markup)
 
@@ -160,9 +188,16 @@ async def step_outcome(cb: CallbackQuery, state: FSMContext) -> None:
     guarantees: the write is committed here, immediately, so a user who taps
     «Частично» and closes Telegram still has ``main_outcome = partial`` in the
     DB long before any DailyEntry exists; the target Reflection Day comes out
-    of the callback, so the tap works with a completely empty FSM (a scheduled
-    prompt that survived a restart); and identity is ``cb.from_user.id``, so
-    one user's tap can never close another user's intention.
+    of the callback when nothing froze it earlier, so the tap works with a
+    completely empty FSM (a scheduled prompt that survived a restart); and
+    identity is ``cb.from_user.id``, so one user's tap can never close another
+    user's intention.
+
+    Everything else about a tap is treated as suspicion, because inline buttons
+    outlive the flow they belonged to: a day whose evening is already filled is
+    only corrected by a flow that started as an edit, a button asking for the
+    other morning field is stale, and a date that disagrees with the open flow
+    loses to it.
     """
     await cb.answer()
     parts = (cb.data or "").split(":")
@@ -170,10 +205,18 @@ async def step_outcome(cb: CallbackQuery, state: FSMContext) -> None:
         logger.warning("Malformed outcome callback ignored")
         return
     outcome_field, outcome = parts[2], parts[3]
+    data = await state.get_data()
+    open_field = evening_flow.expected_outcome_field(await state.get_state())
+    if open_field is not None and open_field != outcome_field:
+        logger.info("Outcome callback for another question than the open one; ignored")
+        return
+    # Edit permission lives in the FSM, never in callback data: a button alone
+    # cannot claim the right to rewrite a closed day.
+    edit_mode = bool(data.get("edit_mode"))
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
         user = authorize(session, runtime.settings, cb.from_user.id)
-        target_date = _baked_date(parts, 4) or reflection_day(user.timezone)
+        target_date = _resolve_target_date(data, parts, 4, user)
         try:
             intent = morning_service.record_outcome(
                 session,
@@ -181,14 +224,24 @@ async def step_outcome(cb: CallbackQuery, state: FSMContext) -> None:
                 outcome_field=outcome_field,
                 outcome=outcome,
                 intention_date=target_date,
+                allow_filled_day_edit=edit_mode,
             )
-        except morning_service.MorningValidationError:
-            # A stale or hand-crafted callback: an unknown value, or a day with
-            # no morning intention (or no secondary one) to close. Nothing is
+        except (
+            morning_service.MorningValidationError,
+            morning_service.MorningLockedError,
+        ):
+            # A stale or hand-crafted callback: an unknown value, a day with no
+            # morning intention (or no secondary one) to close, or an evening
+            # that is already filled and was not opened for editing. Nothing is
             # written and the ongoing flow is left alone.
             logger.info("Rejected outcome callback %s", cb.data)
             return
-        prompt = evening_flow.build_evening_prompt(intent, target_date)
+        prompt = evening_flow.build_evening_prompt(
+            intent,
+            target_date,
+            edit_mode=edit_mode,
+            after_outcome_field=outcome_field,
+        )
     await state.update_data(target_date=target_date.isoformat())
     await state.set_state(prompt.state)
     if cb.message:
@@ -356,6 +409,17 @@ async def _show_today(message: Message, telegram_user_id: int) -> None:
         day = reflection_day(user.timezone)
         entry = checkin_service.get_entry(session, user, entry_date=day)
         intent = morning_service.get_intent(session, user, intention_date=day)
+        lock = morning_service.get_lock(session, user, intention_date=day)
+
+    # The morning action follows the same rule that protects the record, so a
+    # button here can never promise an edit the service would refuse: nothing
+    # at all once the morning is locked or its day already has an evening.
+    if lock is not None:
+        morning_action: keyboards.MorningAction | None = None
+    elif intent is not None:
+        morning_action = keyboards.MorningAction.EDIT
+    else:
+        morning_action = keyboards.MorningAction.CREATE
 
     await message.answer(
         texts.today_message(
@@ -367,7 +431,7 @@ async def _show_today(message: Message, telegram_user_id: int) -> None:
             intent,
         ),
         reply_markup=keyboards.today_actions_keyboard(
-            has_morning=intent is not None, has_evening=entry is not None
+            morning_action=morning_action, has_evening=entry is not None
         ),
     )
 

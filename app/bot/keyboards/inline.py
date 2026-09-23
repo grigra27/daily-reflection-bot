@@ -8,6 +8,7 @@ outcome — never a display value or any user text.
 from __future__ import annotations
 
 from datetime import date
+from enum import Enum, auto
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -92,19 +93,34 @@ def skip_keyboard(callback_prefix: str) -> InlineKeyboardMarkup:
     )
 
 
-def today_actions_keyboard(*, has_morning: bool, has_evening: bool) -> InlineKeyboardMarkup:
+class MorningAction(Enum):
+    """What /today may legitimately offer for the morning block (v1.2).
+
+    Derived from the morning lock rather than from "does a row exist", so the
+    keyboard can never offer an edit or a retroactive plan the service would
+    refuse. ``None`` (no member) means neither button is shown.
+    """
+
+    EDIT = auto()
+    CREATE = auto()
+
+
+def today_actions_keyboard(
+    *, morning_action: MorningAction | None, has_evening: bool
+) -> InlineKeyboardMarkup:
     """Contextual /today actions — morning and evening, current date only."""
-    morning = (
-        InlineKeyboardButton(text="✏️ Изменить утро", callback_data="mrn:edit")
-        if has_morning
-        else InlineKeyboardButton(text="☀️ Записать утро", callback_data="mrn:start")
-    )
+    row: list[InlineKeyboardButton] = []
+    if morning_action is MorningAction.EDIT:
+        row.append(InlineKeyboardButton(text="✏️ Изменить утро", callback_data="mrn:edit"))
+    elif morning_action is MorningAction.CREATE:
+        row.append(InlineKeyboardButton(text="☀️ Записать утро", callback_data="mrn:start"))
     evening = (
         InlineKeyboardButton(text="✏️ Изменить итог", callback_data="act:edit")
         if has_evening
         else InlineKeyboardButton(text="🌙 Заполнить итог", callback_data="act:checkin")
     )
-    return InlineKeyboardMarkup(inline_keyboard=[[morning, evening]])
+    row.append(evening)
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
 def morning_prompt_keyboard() -> InlineKeyboardMarkup:

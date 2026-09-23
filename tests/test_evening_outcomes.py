@@ -107,6 +107,18 @@ async def ask_evening(tg_id: int = ME) -> tuple[_LoggedMessage, FakeState]:
     return msg, state
 
 
+async def start_edit(tg_id: int = ME) -> tuple[_LoggedMessage, FakeState]:
+    """``✏️ Изменить`` on a filled day: (prompt message, FSM).
+
+    The FSM returned here is the one the edit flow itself created, so it carries
+    the edit permission the outcome handler needs — a fresh ``FakeState`` would
+    model a stale button instead of an edit."""
+    state = FakeState()
+    msg = logged_bot_message(tg_id)
+    await daily.cb_start_checkin(callback("act:edit", user_id=tg_id, message=msg), state)
+    return msg, state
+
+
 async def tap(
     data: str,
     state: FakeState,
@@ -273,9 +285,11 @@ async def test_resume_continues_at_the_first_unanswered_step(
     assert not any(b.startswith("ci:out:") for b in button_data(third.markups[-1]))
 
 
-async def test_edit_rewinds_to_the_first_outcome_without_clearing_answers(
+async def test_edit_rewalks_both_outcomes_without_clearing_answers(
     app_runtime, session_factory  # noqa: F811
 ) -> None:
+    # Review P0: an evening that is already closed is re-walked question by
+    # question — the stored secondary answer must not swallow step B.
     today = reflection_day(TZ).isoformat()
     await plan()
     _, state = await ask_evening()
@@ -284,19 +298,48 @@ async def test_edit_rewinds_to_the_first_outcome_without_clearing_answers(
     await close_scores(state)
     assert outcomes(session_factory) == ("done", "done")
 
-    target = logged_bot_message()
-    await daily.cb_start_checkin(callback("act:edit", user_id=ME, message=target), FakeState())
+    target, edit_state = await start_edit()
     assert target.answers[-1] == texts.q_main_outcome("backup Flow")
+    assert edit_state.data["edit_mode"] is True
     # Walking back does not wipe what was already answered...
     assert outcomes(session_factory) == ("done", "done")
     assert count(session_factory, DailyEntry) == 1
 
-    # ...and a new tap replaces exactly one column.
-    await tap(f"ci:out:main:not_done:{today}", FakeState(), message=target)
+    # ...and a new main tap is followed by the SECOND question, even though it
+    # already has an answer, rather than jumping to the ratings.
+    prompt = await tap(f"ci:out:main:not_done:{today}", edit_state, message=target)
+    assert prompt.edits[-1] == texts.q_secondary_outcome("зал, заказать страховку")
+    assert edit_state.state == CheckinStates.waiting_secondary_outcome
     assert outcomes(session_factory) == ("not_done", "done")
 
+    prompt2 = await tap(f"ci:out:secondary:partial:{today}", edit_state, message=prompt)
+    assert prompt2.edits[-1] == texts.evening_day_prompt(fetch(session_factory))
+    assert outcomes(session_factory) == ("not_done", "partial")
+    # Each tap replaces exactly one column, and the day entry stays as it was.
+    assert count(session_factory, DailyEntry) == 1
 
-async def test_abandoning_an_edit_leaves_every_existing_answer_intact(
+
+async def test_abandoning_an_edit_after_the_first_answer_keeps_the_second(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    today = reflection_day(TZ).isoformat()
+    await plan()
+    _, state = await ask_evening()
+    await tap(f"ci:out:main:done:{today}", state)
+    await tap(f"ci:out:secondary:not_done:{today}", state)
+    await close_scores(state)
+
+    target, edit_state = await start_edit()
+    # The user corrects the first answer and stops there, before step B.
+    await tap(f"ci:out:main:partial:{today}", edit_state, message=target)
+    assert outcomes(session_factory) == ("partial", "not_done")
+    with session_scope(session_factory) as s:
+        entry = s.query(DailyEntry).one()
+        assert (entry.day_score, entry.mood_score, entry.energy_score) == (4, 3, 2)
+        assert s.query(MorningIntent).one().main_intention == "backup Flow"
+
+
+async def test_nothing_changes_when_an_edit_is_not_finished(
     app_runtime, session_factory  # noqa: F811
 ) -> None:
     today = reflection_day(TZ).isoformat()
@@ -306,14 +349,99 @@ async def test_abandoning_an_edit_leaves_every_existing_answer_intact(
     await tap(f"ci:out:secondary:not_done:{today}", state)
     await close_scores(state)
 
-    target = logged_bot_message()
-    await daily.cb_start_checkin(callback("act:edit", user_id=ME, message=target), FakeState())
+    await start_edit()
     # The user stops here: no further tap at all.
     assert outcomes(session_factory) == ("partial", "not_done")
     with session_scope(session_factory) as s:
         entry = s.query(DailyEntry).one()
         assert (entry.day_score, entry.mood_score, entry.energy_score) == (4, 3, 2)
         assert s.query(MorningIntent).one().main_intention == "backup Flow"
+
+
+# --------------------------------------------------------------------------
+# Review P0: a closed evening is only re-opened by an explicit edit
+# --------------------------------------------------------------------------
+async def test_a_stale_tap_cannot_rewrite_a_filled_day(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    today = reflection_day(TZ).isoformat()
+    await plan()
+    _, state = await ask_evening()
+    await tap(f"ci:out:main:done:{today}", state)
+    await tap(f"ci:out:secondary:done:{today}", state)
+    await close_scores(state)
+
+    # The evening message from earlier is still on screen and gets tapped again
+    # — with no FSM at all, which is exactly what a scheduled prompt leaves.
+    stale = await tap(f"ci:out:main:not_done:{today}", FakeState())
+    assert outcomes(session_factory) == ("done", "done")
+    assert count(session_factory, MorningIntent) == 1
+    assert count(session_factory, DailyEntry) == 1
+    assert stale.edits == []  # the user's screen is not moved on either
+
+
+async def test_the_same_button_tapped_through_an_edit_does_change_it(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    # The difference is not the button but the flow it came through.
+    today = reflection_day(TZ).isoformat()
+    await plan()
+    _, state = await ask_evening()
+    await tap(f"ci:out:main:done:{today}", state)
+    await close_scores(state)
+
+    target, edit_state = await start_edit()
+    await tap(f"ci:out:main:not_done:{today}", edit_state, message=target)
+    assert outcomes(session_factory) == ("not_done", None)
+    assert count(session_factory, DailyEntry) == 1
+
+
+# --------------------------------------------------------------------------
+# Review P1: the open flow decides the day, and the field it is asking about
+# --------------------------------------------------------------------------
+async def test_the_frozen_flow_date_beats_a_stale_callback_date(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    yesterday = reflection_day(TZ) - timedelta(days=1)
+    today = reflection_day(TZ)
+    await plan(main="сегодня", secondary=None)
+    with session_scope(session_factory) as s:
+        u = UserRepository(s).get_by_telegram_id(ME)
+        assert u is not None
+        s.add(
+            MorningIntent(
+                user_id=u.id, intention_date=yesterday, main_intention="вчера"
+            )
+        )
+        s.commit()
+
+    _, state = await ask_evening()  # freezes today
+    # A button belonging to yesterday's prompt, tapped inside today's flow.
+    await tap(f"ci:out:main:done:{yesterday.isoformat()}", state)
+    with session_scope(session_factory) as s:
+        by_date = {r.intention_date: r.main_outcome for r in s.query(MorningIntent)}
+        assert by_date == {yesterday: None, today: "done"}
+    assert state.data["target_date"] == today.isoformat()
+
+
+async def test_a_button_for_the_other_question_is_ignored_while_one_is_open(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    today = reflection_day(TZ).isoformat()
+    await plan()
+    _, state = await ask_evening()
+    assert state.state == CheckinStates.waiting_main_outcome
+    prompt = logged_bot_message()
+
+    # Step B's button, tapped while step A is the open question.
+    ignored = await tap(f"ci:out:secondary:done:{today}", state, message=prompt)
+    assert outcomes(session_factory) == (None, None)
+    assert ignored.edits == []
+    assert state.state == CheckinStates.waiting_main_outcome
+    # The flow still works when the right button is tapped.
+    await tap(f"ci:out:main:done:{today}", state, message=prompt)
+    assert outcomes(session_factory) == ("done", None)
+    assert prompt.edits[-1] == texts.q_secondary_outcome("зал, заказать страховку")
 
 
 # --------------------------------------------------------------------------
@@ -482,6 +610,9 @@ async def test_plan_text_is_escaped_in_every_evening_view(
     assert rendered.count(safe) >= 4  # both closure questions + /today + /morning
 
 
+# --------------------------------------------------------------------------
+# Spec 25: /today shows a result line only for what was actually answered
+# --------------------------------------------------------------------------
 async def test_today_shows_a_result_line_per_recorded_outcome(
     app_runtime, session_factory  # noqa: F811
 ) -> None:
@@ -568,3 +699,44 @@ async def test_morning_texts_are_never_rewritten_by_an_outcome_tap(
     row = fetch(session_factory)
     assert (row.main_intention, row.secondary_intention) == ("главное", "ещё")
     assert (row.main_outcome, row.secondary_outcome) == ("done", "done")
+
+
+# --------------------------------------------------------------------------
+# Review P2: /today never offers a morning action the service would refuse
+# --------------------------------------------------------------------------
+async def today_buttons(tg_id: int = ME) -> list[str]:
+    view = logged_user_message(tg_id, "/today")
+    await daily.cmd_today(view)
+    return [b.text for row in view.markups[-1].inline_keyboard for b in row]
+
+
+async def test_today_offers_the_morning_edit_only_until_an_outcome_exists(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    today = reflection_day(TZ).isoformat()
+    await plan(main="главное", secondary=None)
+    assert await today_buttons() == ["✏️ Изменить утро", "🌙 Заполнить итог"]
+
+    # Closing the loop freezes the plan, so the button that would reopen it
+    # disappears with it.
+    _, state = await ask_evening()
+    await tap(f"ci:out:main:done:{today}", state)
+    assert await today_buttons() == ["🌙 Заполнить итог"]
+
+
+async def test_today_never_offers_a_retroactive_morning_for_a_filled_day(
+    app_runtime, session, user  # noqa: F811
+) -> None:
+    # An empty day really is still open for planning.
+    assert await today_buttons() == ["☀️ Записать утро", "🌙 Заполнить итог"]
+
+    session.add(
+        DailyEntry(
+            user_id=user.id, entry_date=reflection_day(TZ), day_score=3, mood_score=3,
+            energy_score=3,
+        )
+    )
+    session.commit()
+    # A filled evening with no morning row: "записать утро" would promise a write
+    # the service now refuses, so only the evening action is left.
+    assert await today_buttons() == ["✏️ Изменить итог"]

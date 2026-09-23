@@ -36,12 +36,23 @@ class EveningPrompt:
 
 
 def build_evening_prompt(
-    intent: MorningIntent | None, target_date: date, *, restart: bool = False
+    intent: MorningIntent | None,
+    target_date: date,
+    *,
+    edit_mode: bool = False,
+    after_outcome_field: str | None = None,
 ) -> EveningPrompt:
-    """The first evening question for ``target_date``, with the target date
+    """The next evening question for ``target_date``, with the target date
     baked into every button so the flow survives the 05:00 rollover, a process
-    restart and a lost MemoryStorage."""
-    step = next_evening_step(intent, restart=restart)
+    restart and a lost MemoryStorage.
+
+    ``edit_mode``/``after_outcome_field`` come straight out of the FSM and are
+    handed to the one canonical step rule: a resumed evening asks what is
+    still open, an explicit edit re-walks both questions.
+    """
+    step = next_evening_step(
+        intent, edit_mode=edit_mode, after_outcome_field=after_outcome_field
+    )
     if intent is not None and step is EveningStep.MAIN_OUTCOME:
         return EveningPrompt(
             step,
@@ -63,3 +74,19 @@ def build_evening_prompt(
         keyboards.day_keyboard(target_date),
         None,
     )
+
+
+#: The morning field each open outcome state is waiting for, keyed by the raw
+#: state string the FSM storage keeps (``aiogram`` stores ``State.state``).
+_OUTCOME_FIELD_BY_STATE: dict[str | None, str] = {
+    CheckinStates.waiting_main_outcome.state: OUTCOME_FIELD_MAIN,
+    CheckinStates.waiting_secondary_outcome.state: OUTCOME_FIELD_SECONDARY,
+}
+
+
+def expected_outcome_field(state_value: str | None) -> str | None:
+    """Which outcome the open flow is actually asking for, or None when no
+    outcome question is open. A tap for the *other* field is not a step of this
+    evening — it is a stale button, and answering it would move the user's
+    screen on to a question they never asked."""
+    return _OUTCOME_FIELD_BY_STATE.get(state_value)
