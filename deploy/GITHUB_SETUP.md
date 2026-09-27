@@ -59,7 +59,7 @@ production
 | Name | Example / default |
 |---|---|
 | `TIMEWEB_HOST` | `<server-ip-or-hostname>` |
-| `TIMEWEB_SSH_USER` | `deploy` |
+| `TIMEWEB_SSH_USER` | `deploy` (live production currently uses `root`, see `TIMEWEB_SETUP.md`) |
 | `TIMEWEB_SSH_PORT` | `22` |
 | `TIMEWEB_DEPLOY_PATH` | `/opt/daily-reflection-bot` |
 

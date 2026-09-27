@@ -5,7 +5,7 @@ done, every future release is deployed automatically by GitHub Actions — the
 server never runs `git clone`, `git pull`, `pip install` or builds from source.
 It only pulls a pre-built Docker image and restarts the container.
 
-Target layout (owned by the `deploy` user):
+Target layout (owned by the `deploy` user; see the note below for the live server):
 
 ```text
 /opt/daily-reflection-bot/
@@ -17,6 +17,21 @@ Target layout (owned by the `deploy` user):
 │   └── reflection.db         # persistent SQLite (survives redeploys)
 └── backups/                  # automatic SQLite snapshots
 ```
+
+> **Current production state (differs from the steps below).** The live server
+> was bootstrapped by hand and does **not** use a `deploy` user:
+>
+> - CI connects as `root` (`TIMEWEB_SSH_USER=root` in the `production`
+>   environment) with the dedicated `github-actions-daily-reflection-bot` key;
+> - `/opt/daily-reflection-bot` and everything in it (including `.env`,
+>   `data/`, `backups/`) is owned by `root:root`;
+> - `data/` carries only the container ACL: `u:10001:rwx` plus the default
+>   `d:u:10001:rwx` — there is no `u:deploy` entry because the user does not exist.
+>
+> Deploy, backup and rollback work as-is under this setup. The `deploy`-user
+> flow documented below remains the recommended hardening; switching to it means
+> running `bootstrap_server.sh`, re-owning the directory and changing
+> `TIMEWEB_SSH_USER` to `deploy`.
 
 > A convenience script, `deploy/bootstrap_server.sh`, performs most of the
 > steps below idempotently. Read it first and run it as root if you prefer.
