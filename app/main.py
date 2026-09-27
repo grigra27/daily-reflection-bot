@@ -26,6 +26,8 @@ COMMANDS = [
     BotCommand(command="morning", description="Фокус дня"),
     BotCommand(command="checkin", description="Итоги дня"),
     BotCommand(command="today", description="Сегодняшний снимок"),
+    BotCommand(command="food", description="Питание"),
+    BotCommand(command="weight", description="Записать вес"),
     BotCommand(command="stats", description="Статистика"),
     BotCommand(command="export", description="Экспорт CSV"),
     BotCommand(command="settings", description="Настройки"),

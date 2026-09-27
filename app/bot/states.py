@@ -7,6 +7,7 @@ ASK_REFLECTION -> WAITING_REFLECTION_TEXT -> COMPLETE
 Morning:         IDLE -> WAITING_MAIN -> WAITING_SECONDARY -> COMPLETE
 Weekly:          WEEKLY_IDLE -> WAITING_BEST_EVENT -> WAITING_ENERGY_DRAINER ->
 WAITING_WANT_MORE -> COMPLETE
+Food (v1.3):     stateless (dated buttons); only /weight uses WAITING_WEIGHT
 """
 
 from __future__ import annotations
@@ -36,8 +37,15 @@ class WeeklyStates(StatesGroup):
     waiting_want_more = State()
 
 
+class WeightStates(StatesGroup):
+    waiting_weight = State()
+
+
 class SettingsStates(StatesGroup):
     waiting_morning_time = State()
+    waiting_food_morning_time = State()
+    waiting_food_evening_time = State()
+    waiting_weight_time = State()
     waiting_checkin_time = State()
     waiting_reminder_time = State()
     waiting_timezone = State()

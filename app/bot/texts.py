@@ -46,6 +46,8 @@ HELP = (
     "/morning — записать или изменить фокус дня\n"
     "/checkin — заполнить сегодняшний итог\n"
     "/today — посмотреть сегодняшний снимок\n"
+    "/food — питание: итог дня и статистика\n"
+    "/weight — записать вес за неделю\n"
     "/stats — статистика\n"
     "/export — выгрузить данные\n"
     "/settings — настройки"
@@ -291,3 +293,187 @@ ASK_TIMEZONE = (
 )
 INVALID_TIME = "Не понял время. Отправь в формате ЧЧ:ММ, например 21:30."
 INVALID_TZ = "Такого часового пояса нет. Пример: Europe/Moscow."
+
+
+# --- Food reflection (v1.3) ----------------------------------------------------
+# Labels for the persisted codes in ``food_service``. Tone stays neutral: facts
+# and numbers, no praise, no motivational phrases.
+FOOD_RULE_LABEL: dict[str, str] = {
+    "no_late_eating": "Не ем за 3 ч до сна",
+    "no_fastfood": "Без фастфуда и доставки",
+    "no_sweets": "Без сладкого",
+    "no_chips": "Без чипсов",
+    "no_sugary_drinks": "Без сладких напитков",
+    "no_alcohol": "Без алкоголя",
+    "stop_when_full": "Стоп при сытости",
+    "no_screen": "Ем без экрана",
+    "no_packaging": "Не ем из упаковки",
+    "water": "Вода 1,5–2 л",
+    "no_after_20": "Не ем после 20:00",
+    "no_snacks": "Без перекусов",
+    "breakfast": "Нормальный завтрак",
+    "vegetables": "Овощи в обед и ужин",
+    "no_seconds": "Без добавки",
+    "eat_slowly": "Ем медленно",
+    "steps": "8 000+ шагов",
+}
+
+FOOD_TRIGGER_LABEL: dict[str, str] = {
+    "stress": "Стресс",
+    "tired": "Усталость",
+    "boredom": "Скука",
+    "company": "Компания / праздник",
+    "hunger": "Сильный голод",
+    "sleep": "Недосып",
+    "no_food": "Не было нормальной еды",
+}
+
+FOOD_SECTION = "🍽 <b>Питание</b>"
+FOOD_NO_FOCUS = "Без фокуса"
+FOOD_MORNING_PROMPT = f"{FOOD_SECTION}\n\nНа чём по еде сосредоточишься сегодня?"
+FOOD_EVENING_HINT = "Отметь, что нарушил. Нажатие переключает ✅ ↔ ❌."
+FOOD_TRIGGERS_QUESTION = "<b>Что повлияло?</b> Можно выбрать несколько или пропустить."
+FOOD_DAY_CLOSED = "Итог по питанию за этот день уже сохранён. Изменить: /food"
+FOOD_DATE_REFUSED = "Эта кнопка устарела — день уже нельзя изменить."
+FOOD_RULE_DISABLED = "Это правило сейчас выключено в настройках."
+FOOD_LAST_RULE = "Хотя бы одно правило должно остаться включённым."
+FOOD_NO_DATA = "За этот период ещё нет итогов по питанию."
+
+WEIGHT_PROMPT = (
+    "⚖️ <b>Вес</b>\n\nЗапиши вес на этой неделе — отправь одно число, например 92.4."
+)
+WEIGHT_ASK = "⚖️ Отправь вес одним числом, например 92.4."
+WEIGHT_INVALID = "Не понял число. Отправь вес в килограммах, например 92.4."
+
+
+def food_rule_label(code: str) -> str:
+    return FOOD_RULE_LABEL.get(code, code)
+
+
+def _food_day_title(target_date: date, today: date) -> str:
+    if target_date == today:
+        return f"{FOOD_SECTION} — итог дня"
+    return f"{FOOD_SECTION} — итог за {target_date.day} {_MONTHS_RU[target_date.month - 1]}"
+
+
+def food_focus_line(focus: str | None) -> str:
+    return f"🎯 Фокус: {food_rule_label(focus) if focus else FOOD_NO_FOCUS.lower()}"
+
+
+def food_focus_saved(focus: str | None) -> str:
+    if focus is None:
+        return f"{FOOD_SECTION}\n\nСегодня без фокуса."
+    return f"{FOOD_SECTION}\n\n🎯 Фокус на сегодня: <b>{food_rule_label(focus)}</b>"
+
+
+def food_checklist_message(
+    target_date: date, today: date, focus: str | None, *, stale: bool = False
+) -> str:
+    lines = [_food_day_title(target_date, today), ""]
+    if stale:
+        lines += ["Вчерашний итог по питанию не заполнен.", ""]
+    if focus:
+        lines += [food_focus_line(focus), ""]
+    lines.append(FOOD_EVENING_HINT)
+    return "\n".join(lines)
+
+
+def food_summary_message(
+    target_date: date,
+    today: date,
+    *,
+    rules: list[str],
+    broken: list[str],
+    focus: str | None,
+    triggers: list[str],
+    streak: int | None = None,
+) -> str:
+    lines = [_food_day_title(target_date, today), ""]
+    lines.append(f"Соблюдено: <b>{len(rules) - len(broken)} из {len(rules)}</b>")
+    if focus:
+        mark = "❌" if focus in broken else "✅"
+        lines.append(f"🎯 Фокус «{food_rule_label(focus)}»: {mark}")
+    if broken:
+        lines += ["", "Нарушено:"]
+        lines += [f"❌ {food_rule_label(c)}" for c in broken]
+    if triggers:
+        lines += ["", "Повлияло: " + ", ".join(FOOD_TRIGGER_LABEL[c] for c in triggers)]
+    if streak:
+        lines += ["", f"Дней подряд без нарушений: <b>{streak}</b>"]
+    return "\n".join(lines)
+
+
+def _signed(value: float) -> str:
+    return f"{value:+.1f}".replace("-", "−")
+
+
+def weight_saved_message(value: float, change: float | None) -> str:
+    text = f"⚖️ Вес записан: <b>{value:.1f} кг</b>"
+    if change is not None:
+        text += f"\nК прошлой записи: {_signed(change)} кг"
+    return text
+
+
+def food_status_block(
+    target_date: date, focus: str | None, focus_set: bool, completed: bool, broken: int, total: int
+) -> str:
+    lines = [f"{FOOD_SECTION} — {target_date.day} {_MONTHS_RU[target_date.month - 1]}", ""]
+    lines.append(food_focus_line(focus) if focus_set else "🎯 Фокус не выбран")
+    if completed:
+        lines.append(f"Итог: соблюдено {total - broken} из {total}")
+    else:
+        lines.append("Итог дня пока не заполнен")
+    return "\n".join(lines)
+
+
+def food_stats_message(stats) -> str:
+    lines = [f"🍽 <b>Питание — последние {stats.period_days} дней</b>", ""]
+    lines.append(f"Заполнено: <b>{stats.completed_days} из {stats.period_days}</b>")
+    if stats.completed_days == 0:
+        lines += ["", FOOD_NO_DATA]
+    else:
+        percent = round(stats.clean_days / stats.completed_days * 100)
+        lines.append(f"Дней без нарушений: <b>{stats.clean_days}</b> ({percent}%)")
+        lines.append(f"Текущая серия: <b>{stats.streak}</b>")
+        lines += ["", "<b>Правила</b> (от самого трудного):"]
+        for rate in stats.rule_rates:
+            lines.append(f"{rate.percent}% — {food_rule_label(rate.code)} ({rate.kept}/{rate.total})")
+        if stats.focus_total:
+            lines += [
+                "",
+                f"🎯 Фокус дня соблюдён: <b>{stats.focus_kept} из {stats.focus_total}</b>",
+            ]
+        if stats.triggers:
+            lines += ["", "<b>Что чаще влияло:</b>"]
+            lines += [f"{FOOD_TRIGGER_LABEL[c]} — {n}" for c, n in stats.triggers[:5]]
+        if stats.energy_clean is not None:
+            lines += [
+                "",
+                "<b>Дни без нарушений / с нарушениями:</b>",
+                f"Энергия: {stats.energy_clean} / {stats.energy_broken}",
+                f"Настроение: {stats.mood_clean} / {stats.mood_broken}",
+            ]
+    if stats.last_weight is not None:
+        lines += ["", f"⚖️ Вес: <b>{stats.last_weight:.1f} кг</b>"]
+        if stats.weight_change_week is not None:
+            lines.append(f"За неделю: {_signed(stats.weight_change_week)} кг")
+        if stats.weight_change_total is not None:
+            lines.append(f"С первой записи: {_signed(stats.weight_change_total)} кг")
+    return "\n".join(lines)
+
+
+def food_settings_block(
+    food_morning_time: str, food_evening_time: str, weight_time: str, rules_count: int
+) -> str:
+    return (
+        f"\n\n🍽 Питание утром: {food_morning_time}\n"
+        f"🍽 Питание вечером: {food_evening_time}\n"
+        f"⚖️ Вес (воскресенье): {weight_time}\n"
+        f"📋 Правил питания: {rules_count}"
+    )
+
+
+FOOD_RULES_SETTINGS = "📋 <b>Правила питания</b>\n\nНажми, чтобы включить или выключить правило."
+ASK_FOOD_MORNING_TIME = "Во сколько спрашивать про фокус по еде? Формат ЧЧ:ММ (например, 08:45)."
+ASK_FOOD_EVENING_TIME = "Во сколько подводить итог по питанию? Формат ЧЧ:ММ (например, 22:30)."
+ASK_WEIGHT_TIME = "Во сколько по воскресеньям спрашивать вес? Формат ЧЧ:ММ (например, 09:00)."

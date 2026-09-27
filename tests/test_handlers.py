@@ -165,7 +165,8 @@ async def test_start_creates_user_and_registers_scheduler_jobs(app_runtime, sess
 
         jobs = [j.id for j in app_runtime.scheduler.apscheduler.get_jobs()]
         assert sorted(jobs) == sorted(
-            [f"morning:{pk}", f"checkin:{pk}", f"reminder:{pk}"]
+            [f"morning:{pk}", f"checkin:{pk}", f"reminder:{pk}",
+             f"food_morning:{pk}", f"food_evening:{pk}", f"weight:{pk}"]
         )
         assert texts.START in msg.answers  # welcome comes after onboarding
 
@@ -173,7 +174,8 @@ async def test_start_creates_user_and_registers_scheduler_jobs(app_runtime, sess
         await start.cmd_start(user_message(111, "/start"), FakeState())
         jobs2 = [j.id for j in app_runtime.scheduler.apscheduler.get_jobs()]
         assert sorted(jobs2) == sorted(
-            [f"morning:{pk}", f"checkin:{pk}", f"reminder:{pk}"]
+            [f"morning:{pk}", f"checkin:{pk}", f"reminder:{pk}",
+             f"food_morning:{pk}", f"food_evening:{pk}", f"weight:{pk}"]
         )
         with session_scope(session_factory) as s:
             assert len(UserRepository(s).list_all()) == 1

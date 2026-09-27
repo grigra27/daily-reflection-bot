@@ -47,3 +47,23 @@ def set_reminder_time(session: Session, user: User, value: str) -> User:
     except ValueError as exc:
         raise InvalidSettingError(str(exc)) from exc
     return UserRepository(session).save(user)
+
+
+def _set_time(session: Session, user: User, attr: str, value: str) -> User:
+    try:
+        setattr(user, attr, format_hhmm(value))
+    except ValueError as exc:
+        raise InvalidSettingError(str(exc)) from exc
+    return UserRepository(session).save(user)
+
+
+def set_food_morning_time(session: Session, user: User, value: str) -> User:
+    return _set_time(session, user, "food_morning_time", value)
+
+
+def set_food_evening_time(session: Session, user: User, value: str) -> User:
+    return _set_time(session, user, "food_evening_time", value)
+
+
+def set_weight_time(session: Session, user: User, value: str) -> User:
+    return _set_time(session, user, "weight_time", value)

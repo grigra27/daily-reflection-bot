@@ -204,5 +204,100 @@ def settings_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🔔 Напоминание", callback_data="se:reminder"),
                 InlineKeyboardButton(text="🌍 Часовой пояс", callback_data="se:tz"),
             ],
+            [
+                InlineKeyboardButton(text="🍽 Утро: еда", callback_data="se:fdm"),
+                InlineKeyboardButton(text="🍽 Вечер: еда", callback_data="se:fde"),
+            ],
+            [
+                InlineKeyboardButton(text="⚖️ Время веса", callback_data="se:wt"),
+                InlineKeyboardButton(text="📋 Правила питания", callback_data="se:fr"),
+            ],
         ]
     )
+
+
+# --- Food reflection (v1.3) ----------------------------------------------------
+# Every food button carries its Reflection Day, like the evening buttons, so a
+# tap stays bound to the day the message was sent for. Callback data holds only
+# catalog codes and dates, e.g. ``fd:t:no_sweets:2026-09-27`` (well under 64 B).
+def food_focus_keyboard(rules: list[str], target_date: date) -> InlineKeyboardMarkup:
+    day = target_date.isoformat()
+    buttons = [
+        InlineKeyboardButton(text=texts.food_rule_label(code), callback_data=f"fd:f:{code}:{day}")
+        for code in rules
+    ]
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton(text=texts.FOOD_NO_FOCUS, callback_data=f"fd:f:none:{day}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def food_checklist_keyboard(
+    rules: list[str], broken: list[str], focus: str | None, target_date: date
+) -> InlineKeyboardMarkup:
+    day = target_date.isoformat()
+    rows = []
+    for code in rules:
+        mark = "❌" if code in broken else "✅"
+        prefix = "🎯 " if code == focus else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{mark} {prefix}{texts.food_rule_label(code)}",
+                    callback_data=f"fd:t:{code}:{day}",
+                )
+            ]
+        )
+    submit = f"Готово (нарушений: {len(broken)})" if broken else "✅ Всё соблюдал"
+    rows.append([InlineKeyboardButton(text=submit, callback_data=f"fd:ok:{day}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def food_triggers_keyboard(chosen: list[str], target_date: date) -> InlineKeyboardMarkup:
+    day = target_date.isoformat()
+    buttons = [
+        InlineKeyboardButton(
+            text=f"{'☑️' if code in chosen else '▫️'} {label}",
+            callback_data=f"fd:g:{code}:{day}",
+        )
+        for code, label in texts.FOOD_TRIGGER_LABEL.items()
+    ]
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    done = "Готово" if chosen else "Пропустить"
+    rows.append([InlineKeyboardButton(text=done, callback_data=f"fd:gd:{day}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def food_status_keyboard(
+    target_date: date, *, completed: bool, can_set_focus: bool, active: int
+) -> InlineKeyboardMarkup:
+    day = target_date.isoformat()
+    first: list[InlineKeyboardButton] = []
+    if can_set_focus:
+        first.append(InlineKeyboardButton(text="🎯 Фокус", callback_data=f"fd:focus:{day}"))
+    first.append(
+        InlineKeyboardButton(
+            text="✏️ Изменить итог" if completed else "📝 Заполнить итог",
+            callback_data=f"fd:open:{day}",
+        )
+    )
+
+    def period(days: int, label: str) -> InlineKeyboardButton:
+        prefix = "▸ " if days == active else ""
+        return InlineKeyboardButton(text=f"{prefix}{label}", callback_data=f"fd:st:{days}")
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[first, [period(7, "7 дней"), period(30, "30 дней"), period(90, "90 дней")]]
+    )
+
+
+def food_rules_settings_keyboard(active: list[str], catalog: tuple[str, ...]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{'✅' if code in active else '▫️'} {texts.food_rule_label(code)}",
+                callback_data=f"se:fr:{code}",
+            )
+        ]
+        for code in catalog
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)

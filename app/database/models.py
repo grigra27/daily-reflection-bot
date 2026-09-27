@@ -14,6 +14,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -42,6 +43,14 @@ class User(Base):
     checkin_time: Mapped[str] = mapped_column(String(5), default="21:30", nullable=False)
     reminder_time: Mapped[str] = mapped_column(String(5), default="23:00", nullable=False)
     morning_time: Mapped[str] = mapped_column(String(5), default="08:30", nullable=False)
+    # v1.3 food reflection: three separate prompts and the user's own rule set.
+    # ``food_rules`` is a comma-separated list of rule codes from the catalog in
+    # ``food_service``; NULL means "the default set", so the catalog can evolve
+    # without a data migration for users who never customised it.
+    food_morning_time: Mapped[str] = mapped_column(String(5), default="08:45", nullable=False)
+    food_evening_time: Mapped[str] = mapped_column(String(5), default="22:30", nullable=False)
+    weight_time: Mapped[str] = mapped_column(String(5), default="09:00", nullable=False)
+    food_rules: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -54,6 +63,12 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
     morning_intents: Mapped[list[MorningIntent]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    food_days: Mapped[list[FoodDay]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    weight_logs: Mapped[list[WeightLog]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -138,3 +153,82 @@ class WeeklyReflection(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="weekly_reflections")
+
+
+class FoodDay(Base):
+    """One food reflection per user per Reflection Day (v1.3).
+
+    The morning focus and the evening checklist share this row. A row may
+    exist with only a focus (morning answered, evening not yet), with only
+    draft rule results (checklist tapped but not submitted), or complete.
+    ``completed_at`` is what marks the evening as submitted; until then the
+    rule results are a draft that survives restarts.
+    """
+
+    __tablename__ = "food_days"
+    __table_args__ = (UniqueConstraint("user_id", "food_date", name="uq_food_day_user_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    food_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # NULL with ``focus_set_at`` present means "answered: no focus today".
+    focus_rule: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    focus_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Comma-separated trigger codes, only meaningful when a rule was broken.
+    triggers: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="food_days")
+    results: Mapped[list[FoodRuleResult]] = relationship(
+        back_populates="food_day", cascade="all, delete-orphan", order_by="FoodRuleResult.id"
+    )
+
+
+class FoodRuleResult(Base):
+    """Whether one rule was kept on one day. Keyed by the rule *code*, so
+    disabling a rule later never rewrites or orphans its history."""
+
+    __tablename__ = "food_rule_results"
+    __table_args__ = (
+        UniqueConstraint("food_day_id", "rule_code", name="uq_food_rule_result_day_rule"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    food_day_id: Mapped[int] = mapped_column(
+        ForeignKey("food_days.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    rule_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    kept: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+    food_day: Mapped[FoodDay] = relationship(back_populates="results")
+
+
+class WeightLog(Base):
+    """One weight value per user per ISO week (v1.3)."""
+
+    __tablename__ = "weight_logs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "week_start_date", name="uq_weight_user_week"),
+        CheckConstraint("weight_kg > 0", name="ck_weight_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    week_start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # The Reflection Day the value was entered on (for the CSV export).
+    logged_date: Mapped[date] = mapped_column(Date, nullable=False)
+    weight_kg: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="weight_logs")
