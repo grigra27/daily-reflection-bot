@@ -189,7 +189,7 @@ def test_missing_secondary_is_empty_string(session: Session) -> None:
     assert _rows(data)[0]["morning_secondary_intention"] == ""
 
 
-def test_header_fields_match_v12_contract(session: Session) -> None:
+def test_header_fields_match_v13_contract(session: Session) -> None:
     a = _make_user(session, 111)
     _, data = export_service.export_user_csv(session, a, scope="all", today=TODAY)
     header = next(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
@@ -206,6 +206,12 @@ def test_header_fields_match_v12_contract(session: Session) -> None:
         "reflection_text",
         "evening_created_at",
         "evening_updated_at",
+        "food_focus",
+        "food_completed",
+        "food_kept_rules",
+        "food_broken_rules",
+        "food_triggers",
+        "weight_kg",
     ]
 
 

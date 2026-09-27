@@ -20,8 +20,14 @@ from datetime import date, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.database.models import DailyEntry, MorningIntent, User
-from app.database.repositories import DailyEntryRepository, MorningIntentRepository
+from app.database.models import DailyEntry, FoodDay, MorningIntent, User, WeightLog
+from app.database.repositories import (
+    DailyEntryRepository,
+    FoodDayRepository,
+    MorningIntentRepository,
+    WeightLogRepository,
+)
+from app.services import food_service
 
 FIELDS = [
     "date",
@@ -36,6 +42,13 @@ FIELDS = [
     "reflection_text",
     "evening_created_at",
     "evening_updated_at",
+    # v1.3 food reflection: rule codes joined with ";" (codes, not labels).
+    "food_focus",
+    "food_completed",
+    "food_kept_rules",
+    "food_broken_rules",
+    "food_triggers",
+    "weight_kg",
 ]
 
 SCOPES = ("30d", "90d", "year", "all")
@@ -58,9 +71,21 @@ def _scope_start(scope: str, today: date) -> date | None:
 
 
 def build_csv(
-    mornings: list[MorningIntent], entries: list[DailyEntry], *, scope: str, today: date
+    mornings: list[MorningIntent],
+    entries: list[DailyEntry],
+    *,
+    scope: str,
+    today: date,
+    food_days: list[FoodDay] | None = None,
+    weights: list[WeightLog] | None = None,
 ) -> bytes:
     start = _scope_start(scope, today)
+    by_date_food = {
+        d.food_date: d for d in food_days or [] if start is None or d.food_date >= start
+    }
+    by_date_weight = {
+        w.logged_date: w for w in weights or [] if start is None or w.logged_date >= start
+    }
     by_date_morning = {
         m.intention_date: m for m in mornings if start is None or m.intention_date >= start
     }
@@ -70,11 +95,15 @@ def build_csv(
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\r\n")
     writer.writerow(FIELDS)
-    for day in sorted(set(by_date_morning) | set(by_date_entry)):
+    all_dates = set(by_date_morning) | set(by_date_entry) | set(by_date_food) | set(by_date_weight)
+    for day in sorted(all_dates):
         if day > today:
             continue
         m = by_date_morning.get(day)
         e = by_date_entry.get(day)
+        f = by_date_food.get(day)
+        w = by_date_weight.get(day)
+        done = food_service.is_completed(f)
         writer.writerow(
             [
                 day.isoformat(),
@@ -89,6 +118,12 @@ def build_csv(
                 e.reflection_text or "" if e else "",
                 _fmt_dt(e.created_at) if e else "",
                 _fmt_dt(e.updated_at) if e else "",
+                (f.focus_rule or "") if f else "",
+                ("yes" if done else "no") if f else "",
+                ";".join(food_service.kept_rules(f)) if done else "",
+                ";".join(food_service.violations(f)) if done else "",
+                ";".join(food_service.triggers_of(f)) if done else "",
+                w.weight_kg if w else "",
             ]
         )
     # utf-8-sig adds a BOM, which makes Excel and Google Sheets decode
@@ -103,5 +138,9 @@ def export_user_csv(
         raise ValueError(f"unknown export scope: {scope}")
     mornings = MorningIntentRepository(session).list_all(user.id)
     entries = DailyEntryRepository(session).list_all(user.id)
+    food_days = FoodDayRepository(session).list_all(user.id)
+    weights = WeightLogRepository(session).list_all(user.id)
     filename = f"reflection_export_{today.isoformat()}.csv"
-    return filename, build_csv(mornings, entries, scope=scope, today=today)
+    return filename, build_csv(
+        mornings, entries, scope=scope, today=today, food_days=food_days, weights=weights
+    )

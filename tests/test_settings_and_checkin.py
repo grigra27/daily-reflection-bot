@@ -99,7 +99,10 @@ async def test_setting_morning_time_reschedules_all_three_jobs(
         with session_scope(session_factory) as s:
             assert UserRepository(s).get_by_telegram_id(111).morning_time == "07:20"
         jobs = {j.id: j for j in app_runtime.scheduler.apscheduler.get_jobs()}
-        assert set(jobs) == {f"morning:{pk}", f"checkin:{pk}", f"reminder:{pk}"}
+        assert set(jobs) == {
+            f"morning:{pk}", f"checkin:{pk}", f"reminder:{pk}",
+            f"food_morning:{pk}", f"food_evening:{pk}", f"weight:{pk}",
+        }
         assert "hour='7', minute='20'" in str(jobs[f"morning:{pk}"].trigger)
     finally:
         app_runtime.scheduler.apscheduler.shutdown(wait=False)

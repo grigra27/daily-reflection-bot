@@ -10,10 +10,10 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot import keyboards, texts
 from app.bot.deps import AuthorizedFilter, PrivateChatFilter
-from app.database.repositories import DailyEntryRepository
+from app.database.repositories import DailyEntryRepository, FoodDayRepository
 from app.database.session import session_scope
 from app.runtime import get_runtime
-from app.services import stats_service
+from app.services import food_service, stats_service
 from app.services.auth_service import authorize
 from app.services.time_service import reflection_day
 
@@ -22,6 +22,15 @@ router.message.filter(AuthorizedFilter(), PrivateChatFilter())
 router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
 
 _DEFAULT_PERIOD = 30
+
+
+def _food_line(food_days) -> str | None:
+    """One v1.3 line linking to /food; omitted until a food day was submitted."""
+    done = [d for d in food_days if food_service.is_completed(d)]
+    if not done:
+        return None
+    clean = sum(1 for d in done if not food_service.violations(d))
+    return f"🍽 Питание без нарушений: <b>{clean} из {len(done)}</b> дней — подробнее /food"
 
 
 def _render(user, stats: stats_service.StatsResult) -> str:
@@ -64,8 +73,12 @@ async def _build_stats(event: Message | CallbackQuery, period_days: int):
         today = reflection_day(user.timezone)
         start = today - timedelta(days=period_days - 1)
         entries = DailyEntryRepository(session).list_in_range(user.id, start, today)
+        food_line = _food_line(FoodDayRepository(session).list_in_range(user.id, start, today))
     stats = stats_service.compute_stats(entries, period_days=period_days, today=today)
-    return _render(user, stats), keyboards.stats_keyboard(period_days)
+    text = _render(user, stats)
+    if food_line:
+        text += f"\n\n{food_line}"
+    return text, keyboards.stats_keyboard(period_days)
 
 
 @router.message(Command("stats"))

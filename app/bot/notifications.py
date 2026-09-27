@@ -17,7 +17,7 @@ from datetime import date
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
-from app.bot import evening_flow, keyboards, texts
+from app.bot import evening_flow, food_flow, keyboards, texts
 from app.database.models import MorningIntent
 
 logger = logging.getLogger("app.notifications")
@@ -60,3 +60,22 @@ async def send_reminder(bot: Bot, chat_id: int) -> None:
         logger.info("Sent reminder to chat %s", chat_id)
     except TelegramAPIError:
         logger.exception("Failed to send reminder to chat %s", chat_id)
+
+
+# --- Food reflection (v1.3) ------------------------------------------------------
+async def send_food_screen(bot: Bot, chat_id: int, screen: food_flow.Screen, kind: str) -> None:
+    """Food prompts are built by the scheduler from the stored day (the screen
+    already carries its dated buttons); this only sends and logs."""
+    try:
+        await bot.send_message(chat_id, screen.text, reply_markup=screen.markup)
+        logger.info("Sent food %s to chat %s", kind, chat_id)
+    except TelegramAPIError:
+        logger.exception("Failed to send food %s to chat %s", kind, chat_id)
+
+
+async def send_weight_prompt(bot: Bot, chat_id: int) -> None:
+    try:
+        await bot.send_message(chat_id, texts.WEIGHT_PROMPT)
+        logger.info("Sent weight prompt to chat %s", chat_id)
+    except TelegramAPIError:
+        logger.exception("Failed to send weight prompt to chat %s", chat_id)
