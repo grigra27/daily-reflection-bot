@@ -1,5 +1,5 @@
-"""Settings management: prompt times, timezone (section 19) and, since v1.3, the
-food prompt times, the Sunday weight time and the food rule set.
+"""Settings management: prompt times, timezone (section 19), the v1.3 food
+prompt times and rule set, and the v1.3.1 vitamin reminder.
 
 Values are validated in the service layer; an invalid time or unknown timezone
 is never persisted. On a successful change the user's scheduler jobs are
@@ -32,19 +32,26 @@ router.message.filter(AuthorizedFilter(), PrivateChatFilter())
 router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
 
 
+def _settings_text(user: User) -> str:
+    return texts.settings_message(
+        user.morning_time, user.checkin_time, user.reminder_time, user.timezone
+    ) + texts.food_settings_block(
+        user.food_morning_time,
+        user.food_evening_time,
+        user.weight_time,
+        len(food_service.active_rules(user)),
+    ) + texts.vitamin_settings_block(user.vitamin_reminder_enabled, user.vitamin_reminder_time)
+
+
 async def _render_settings(message: Message) -> None:
     runtime = get_runtime()
     with session_scope(runtime.session_factory) as session:
         user = authorize(session, runtime.settings, message.from_user.id)
-        text = texts.settings_message(
-            user.morning_time, user.checkin_time, user.reminder_time, user.timezone
-        ) + texts.food_settings_block(
-            user.food_morning_time,
-            user.food_evening_time,
-            user.weight_time,
-            len(food_service.active_rules(user)),
-        )
-    await message.answer(text, reply_markup=keyboards.settings_keyboard())
+        text = _settings_text(user)
+        enabled = user.vitamin_reminder_enabled
+    await message.answer(
+        text, reply_markup=keyboards.settings_keyboard(enabled)
+    )
 
 
 @router.message(Command("settings"))
@@ -101,6 +108,34 @@ async def ask_weight_time(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     await state.set_state(SettingsStates.waiting_weight_time)
     await cb.message.answer(texts.ASK_WEIGHT_TIME)  # type: ignore[union-attr]
+
+
+@router.callback_query(F.data == "se:vt")
+async def ask_vitamin_time(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await state.set_state(SettingsStates.waiting_vitamin_time)
+    await cb.message.answer(texts.ASK_VITAMIN_TIME)  # type: ignore[union-attr]
+
+
+@router.callback_query(F.data == "se:vto")
+async def toggle_vitamin_reminder(cb: CallbackQuery) -> None:
+    runtime = get_runtime()
+    with session_scope(runtime.session_factory) as session:
+        # Identity from cb.from_user: cb.message was sent by the bot.
+        user = authorize(session, runtime.settings, cb.from_user.id)
+        user = settings_service.set_vitamin_reminder_enabled(
+            session, user, not user.vitamin_reminder_enabled
+        )
+        text = _settings_text(user)
+        enabled = user.vitamin_reminder_enabled
+        user_pk = user.id
+    if runtime.scheduler is not None:
+        runtime.scheduler.reschedule_user(user_pk)
+    await cb.answer()
+    if cb.message is not None:
+        await cb.message.edit_text(
+            text, reply_markup=keyboards.settings_keyboard(enabled)
+        )
 
 
 @router.callback_query(F.data == "se:fr")
@@ -198,3 +233,10 @@ async def set_food_evening(message: Message, state: FSMContext) -> None:
 @router.message(SettingsStates.waiting_weight_time, F.text)
 async def set_weight_time(message: Message, state: FSMContext) -> None:
     await _apply_entry(message, state, settings_service.set_weight_time, texts.INVALID_TIME)
+
+
+@router.message(SettingsStates.waiting_vitamin_time, F.text)
+async def set_vitamin_time(message: Message, state: FSMContext) -> None:
+    await _apply_entry(
+        message, state, settings_service.set_vitamin_reminder_time, texts.INVALID_TIME
+    )

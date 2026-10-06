@@ -48,6 +48,7 @@ class SettingsStates(StatesGroup):
     waiting_weight_time = State()
     waiting_checkin_time = State()
     waiting_reminder_time = State()
+    waiting_vitamin_time = State()
     waiting_timezone = State()
 
 
