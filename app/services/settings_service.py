@@ -67,3 +67,12 @@ def set_food_evening_time(session: Session, user: User, value: str) -> User:
 
 def set_weight_time(session: Session, user: User, value: str) -> User:
     return _set_time(session, user, "weight_time", value)
+
+
+def set_vitamin_reminder_time(session: Session, user: User, value: str) -> User:
+    return _set_time(session, user, "vitamin_reminder_time", value)
+
+
+def set_vitamin_reminder_enabled(session: Session, user: User, enabled: bool) -> User:
+    user.vitamin_reminder_enabled = enabled
+    return UserRepository(session).save(user)

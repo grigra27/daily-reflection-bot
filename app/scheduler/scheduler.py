@@ -1,5 +1,6 @@
-"""Scheduler for morning intentions, daily check-ins, reminders and (v1.3) the
-food focus, food checklist and Sunday weight prompts.
+"""Scheduler for morning intentions, daily check-ins, reminders, (v1.3) the
+food focus, food checklist and Sunday weight prompts and (v1.3.1) the daily
+vitamin reminder.
 
 Uses a repeating cron trigger **per user and per job kind** (never a
 manually-enumerated job per calendar day — baseline section 38) evaluated in
@@ -16,6 +17,7 @@ import logging
 from datetime import time, timedelta
 
 from aiogram import Bot
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.orm import Session, sessionmaker
@@ -142,6 +144,18 @@ class ReflectionScheduler:
             return
         await notifications.send_weight_prompt(self._bot, chat_id)
 
+    # -- vitamins (v1.3.1) ------------------------------------------------------
+    async def _vitamin_reminder_job(self, user_pk: int) -> None:
+        """Pure wall-clock reminder: no DailyEntry/FoodDay/ReflectionDay logic.
+        Re-checks the DB flags at fire time, but a disabled user normally has
+        no job at all (see ``sync_user``)."""
+        with session_scope(self._session_factory) as session:
+            user = session.get(User, user_pk)
+            if user is None or not user.is_active or not user.vitamin_reminder_enabled:
+                return
+            chat_id = user.telegram_user_id
+        await notifications.send_vitamin_reminder(self._bot, chat_id)
+
     # -- job management -----------------------------------------------------
     def _add_job(
         self, user: User, job_id: str, func, value: str, *, day_of_week: str | None = None
@@ -161,6 +175,13 @@ class ReflectionScheduler:
             misfire_grace_time=3600,
         )
 
+    def _remove_job(self, job_id: str) -> None:
+        # Safe when the job was never registered (e.g. first sync after disable).
+        try:
+            self._scheduler.remove_job(job_id)
+        except JobLookupError:
+            pass
+
     def sync_user(self, user: User) -> None:
         """(Re)register this user's repeating jobs. Safe to call repeatedly."""
         self._add_job(user, f"morning:{user.id}", self._morning_job, user.morning_time)
@@ -175,9 +196,17 @@ class ReflectionScheduler:
         self._add_job(
             user, f"weight:{user.id}", self._weight_job, user.weight_time, day_of_week="sun"
         )
+        # A disabled vitamin reminder removes the job outright — it never wakes
+        # up to a no-op.
+        vitamin_job_id = f"vitamins:{user.id}"
+        if user.vitamin_reminder_enabled:
+            self._add_job(user, vitamin_job_id, self._vitamin_reminder_job,
+                          user.vitamin_reminder_time)
+        else:
+            self._remove_job(vitamin_job_id)
         logger.info(
             "Scheduled user %s: morning %s, check-in %s, reminder %s, "
-            "food %s/%s, weight sun %s (%s)",
+            "food %s/%s, weight sun %s, vitamins %s (%s), %s",
             user.id,
             user.morning_time,
             user.checkin_time,
@@ -185,6 +214,8 @@ class ReflectionScheduler:
             user.food_morning_time,
             user.food_evening_time,
             user.weight_time,
+            user.vitamin_reminder_time,
+            "on" if user.vitamin_reminder_enabled else "off",
             user.timezone,
         )
 

@@ -102,6 +102,7 @@ async def test_setting_morning_time_reschedules_all_three_jobs(
         assert set(jobs) == {
             f"morning:{pk}", f"checkin:{pk}", f"reminder:{pk}",
             f"food_morning:{pk}", f"food_evening:{pk}", f"weight:{pk}",
+            f"vitamins:{pk}",
         }
         assert "hour='7', minute='20'" in str(jobs[f"morning:{pk}"].trigger)
     finally:

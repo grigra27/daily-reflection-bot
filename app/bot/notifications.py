@@ -79,3 +79,13 @@ async def send_weight_prompt(bot: Bot, chat_id: int) -> None:
         logger.info("Sent weight prompt to chat %s", chat_id)
     except TelegramAPIError:
         logger.exception("Failed to send weight prompt to chat %s", chat_id)
+
+
+# --- Vitamins (v1.3.1) ---------------------------------------------------------
+async def send_vitamin_reminder(bot: Bot, chat_id: int) -> None:
+    """Text-only reminder: no keyboard, no FSM, no database writes."""
+    try:
+        await bot.send_message(chat_id, texts.VITAMIN_REMINDER)
+        logger.info("Sent vitamin reminder to chat %s", chat_id)
+    except TelegramAPIError:
+        logger.exception("Failed to send vitamin reminder to chat %s", chat_id)

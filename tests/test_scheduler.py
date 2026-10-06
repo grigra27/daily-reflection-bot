@@ -272,8 +272,9 @@ async def test_reschedule_updates_morning_time(session, session_factory, fake_bo
         sched.reschedule_user(u.id)
         job2 = sched.apscheduler.get_job(f"morning:{u.id}")
         assert "hour='7', minute='15'" in str(job2.trigger)
-        # Still exactly six jobs (three v1 + three v1.3 food), no accumulation.
-        assert len(sched.apscheduler.get_jobs()) == 6
+        # Still exactly seven jobs (three v1 + three v1.3 food + default-on
+        # v1.3.1 vitamins), no accumulation.
+        assert len(sched.apscheduler.get_jobs()) == 7
     finally:
         sched.apscheduler.shutdown(wait=False)
 
@@ -288,9 +289,10 @@ async def test_repeating_jobs_per_user_not_per_day(session, session_factory, fak
         assert jobs == {
             f"morning:{u.id}", f"checkin:{u.id}", f"reminder:{u.id}",
             f"food_morning:{u.id}", f"food_evening:{u.id}", f"weight:{u.id}",
+            f"vitamins:{u.id}",
         }
         # Re-syncing (settings change) must replace, not accumulate.
         sched.sync_user(u)
-        assert len(sched.apscheduler.get_jobs()) == 6
+        assert len(sched.apscheduler.get_jobs()) == 7
     finally:
         sched.apscheduler.shutdown(wait=False)

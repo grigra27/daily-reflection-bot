@@ -51,6 +51,12 @@ class User(Base):
     food_evening_time: Mapped[str] = mapped_column(String(5), default="22:30", nullable=False)
     weight_time: Mapped[str] = mapped_column(String(5), default="09:00", nullable=False)
     food_rules: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # v1.3.1: plain wall-clock vitamin reminder — a text message only. There is
+    # deliberately no acknowledgement or history (see the feature spec).
+    vitamin_reminder_time: Mapped[str] = mapped_column(
+        String(5), default="22:00", nullable=False
+    )
+    vitamin_reminder_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

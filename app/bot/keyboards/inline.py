@@ -193,7 +193,7 @@ def export_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def settings_keyboard() -> InlineKeyboardMarkup:
+def settings_keyboard(vitamin_enabled: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -211,6 +211,13 @@ def settings_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="⚖️ Время веса", callback_data="se:wt"),
                 InlineKeyboardButton(text="📋 Правила питания", callback_data="se:fr"),
+            ],
+            [
+                InlineKeyboardButton(text="💊 Время витаминов", callback_data="se:vt"),
+                InlineKeyboardButton(
+                    text="💊 Витамины: вкл" if vitamin_enabled else "💊 Витамины: выкл",
+                    callback_data="se:vto",
+                ),
             ],
         ]
     )
