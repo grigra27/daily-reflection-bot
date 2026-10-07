@@ -22,6 +22,7 @@ from app.bot.keyboards.inline import (
     skip_keyboard,
     stats_keyboard,
     today_actions_keyboard,
+    vitamin_reminder_keyboard,
     weekly_offer_keyboard,
 )
 
@@ -47,5 +48,6 @@ __all__ = [
     "skip_keyboard",
     "stats_keyboard",
     "today_actions_keyboard",
+    "vitamin_reminder_keyboard",
     "weekly_offer_keyboard",
 ]

@@ -1,6 +1,6 @@
 """Scheduler for morning intentions, daily check-ins, reminders, (v1.3) the
-food focus, food checklist and Sunday weight prompts and (v1.3.1) the daily
-vitamin reminder.
+food focus, food checklist and Sunday weight prompts and (v1.3.1/1.3.2) the
+daily vitamin question.
 
 Uses a repeating cron trigger **per user and per job kind** (never a
 manually-enumerated job per calendar day — baseline section 38) evaluated in
@@ -26,7 +26,7 @@ from app.bot import food_flow, notifications
 from app.database.models import User
 from app.database.repositories import UserRepository
 from app.database.session import session_scope
-from app.services import food_service
+from app.services import food_service, vitamin_service
 from app.services.checkin_service import has_entry_today
 from app.services.morning_service import get_intent, has_intent_today
 from app.services.time_service import reflection_day, week_start_date
@@ -144,17 +144,24 @@ class ReflectionScheduler:
             return
         await notifications.send_weight_prompt(self._bot, chat_id)
 
-    # -- vitamins (v1.3.1) ------------------------------------------------------
+    # -- vitamins (v1.3.1 reminder, v1.3.2 acknowledgement) -------------------
     async def _vitamin_reminder_job(self, user_pk: int) -> None:
-        """Pure wall-clock reminder: no DailyEntry/FoodDay/ReflectionDay logic.
-        Re-checks the DB flags at fire time, but a disabled user normally has
-        no job at all (see ``sync_user``)."""
+        """One question per Reflection Day: a day already confirmed by a tap is
+        never asked again, so a refire or accidental reschedule cannot duplicate
+        it. Wall-clock only — the presence of a DailyEntry or FoodDay is
+        irrelevant. Re-checks the DB flags at fire time, but a disabled user
+        normally has no job at all (see ``sync_user``)."""
         with session_scope(self._session_factory) as session:
             user = session.get(User, user_pk)
             if user is None or not user.is_active or not user.vitamin_reminder_enabled:
                 return
             chat_id = user.telegram_user_id
-        await notifications.send_vitamin_reminder(self._bot, chat_id)
+            target_date = reflection_day(user.timezone)
+            already = vitamin_service.is_taken(session, user, target_date)
+        if already:
+            logger.info("Vitamin reminder skipped for user %s: already confirmed today", user_pk)
+            return
+        await notifications.send_vitamin_reminder(self._bot, chat_id, target_date)
 
     # -- job management -----------------------------------------------------
     def _add_job(

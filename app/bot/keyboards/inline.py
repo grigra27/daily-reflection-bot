@@ -308,3 +308,19 @@ def food_rules_settings_keyboard(active: list[str], catalog: tuple[str, ...]) ->
         for code in catalog
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# --- Vitamins (v1.3.2) ----------------------------------------------------------
+def vitamin_reminder_keyboard(target_date: date) -> InlineKeyboardMarkup:
+    """The one ✅ button of the daily vitamin question.
+
+    The Reflection Day is baked into the callback (``vit:yes:2026-10-07``), so a
+    tap hours later or after a restart still belongs to the evening it was asked
+    about. There is no "Нет"/"Позже" control: not tapping records nothing.
+    """
+    day = target_date.isoformat()
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да", callback_data=f"vit:yes:{day}")]
+        ]
+    )
