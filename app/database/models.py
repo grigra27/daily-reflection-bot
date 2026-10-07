@@ -51,8 +51,9 @@ class User(Base):
     food_evening_time: Mapped[str] = mapped_column(String(5), default="22:30", nullable=False)
     weight_time: Mapped[str] = mapped_column(String(5), default="09:00", nullable=False)
     food_rules: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # v1.3.1: plain wall-clock vitamin reminder — a text message only. There is
-    # deliberately no acknowledgement or history (see the feature spec).
+    # v1.3.1: when the daily vitamin question is sent, and whether it is sent at
+    # all. v1.3.2 added the acknowledgement history in ``vitamin_logs``; these
+    # two settings are unchanged.
     vitamin_reminder_time: Mapped[str] = mapped_column(
         String(5), default="22:00", nullable=False
     )
@@ -75,6 +76,9 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
     weight_logs: Mapped[list[WeightLog]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    vitamin_logs: Mapped[list[VitaminLog]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -238,3 +242,29 @@ class WeightLog(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="weight_logs")
+
+
+class VitaminLog(Base):
+    """One vitamin acknowledgement per user per Reflection Day (v1.3.2).
+
+    A row exists only because the user tapped ✅ Да on that day's reminder.
+    The absence of a row means "no confirmation was recorded" — never "the
+    vitamins were not taken", so this stays an adherence nudge rather than a
+    medical tracker. ``vitamin_date`` is the day the reminder was *sent* for
+    (baked into the button), ``taken_at`` the real moment of the tap.
+    """
+
+    __tablename__ = "vitamin_logs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "vitamin_date", name="uq_vitamin_log_user_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    vitamin_date: Mapped[date] = mapped_column(Date, nullable=False)
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped[User] = relationship(back_populates="vitamin_logs")

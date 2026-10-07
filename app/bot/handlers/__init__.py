@@ -9,7 +9,17 @@ from __future__ import annotations
 
 from aiogram import Router
 
-from app.bot.handlers import daily, export, food, morning, settings, start, stats, weekly
+from app.bot.handlers import (
+    daily,
+    export,
+    food,
+    morning,
+    settings,
+    start,
+    stats,
+    vitamins,
+    weekly,
+)
 
 
 def build_root_router() -> Router:
@@ -24,6 +34,8 @@ def build_root_router() -> Router:
     # After every FSM-driven router: its bare-number weight handler only
     # matches outside any flow.
     root.include_router(food.router)
+    # Callback-only: its "vit:yes:" prefix matches nothing else.
+    root.include_router(vitamins.router)
     # Last: only matches users who failed the allow-list filter above.
     root.include_router(start.unauthorized_router)
     return root

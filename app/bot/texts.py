@@ -259,9 +259,13 @@ REMINDER = (
     "Займёт меньше минуты."
 )
 
-# --- Vitamins (v1.3.1) ---------------------------------------------------------
-# A wall-clock text reminder only: no button, no tracking, no advice.
-VITAMIN_REMINDER = "💊 Время принять витамины."
+# --- Vitamins (v1.3.1 reminder, v1.3.2 acknowledgement) ------------------------
+# The daily question and its single ✅ button. A tap replaces the message with
+# VITAMIN_TAKEN; VITAMIN_STALE only refuses a button from an older day. There is
+# deliberately no "No"/"Пропустить" answer: not tapping proves nothing.
+VITAMIN_REMINDER = "💊 Ты принял витамины?"
+VITAMIN_TAKEN = "✅ Витамины приняты."
+VITAMIN_STALE = "Эта кнопка уже устарела."
 
 # --- Weekly ------------------------------------------------------------------
 WEEKLY_OFFER = "📖 Хочешь коротко подвести итог недели?"

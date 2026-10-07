@@ -60,6 +60,9 @@ class FakeMessage:
         self.text = text
         self.answers: list[str] = []
         self.edits: list[str] = []
+        # Parallel to ``edits``: what each edit passed as reply_markup, so a test
+        # can prove a keyboard was actually removed (v1.3.2).
+        self.edit_markups: list[object] = []
 
     async def answer(self, text: str, reply_markup=None, **kwargs) -> None:
         self.answers.append(text)
@@ -69,6 +72,7 @@ class FakeMessage:
         # such attempt in handlers as a test failure.
         assert self.from_user.id == BOT_TG_ID, "bot tried to edit a user-authored message"
         self.edits.append(text)
+        self.edit_markups.append(reply_markup)
 
 
 class FakeCallback:

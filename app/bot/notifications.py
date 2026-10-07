@@ -81,11 +81,19 @@ async def send_weight_prompt(bot: Bot, chat_id: int) -> None:
         logger.exception("Failed to send weight prompt to chat %s", chat_id)
 
 
-# --- Vitamins (v1.3.1) ---------------------------------------------------------
-async def send_vitamin_reminder(bot: Bot, chat_id: int) -> None:
-    """Text-only reminder: no keyboard, no FSM, no database writes."""
+# --- Vitamins (v1.3.1 reminder, v1.3.2 acknowledgement) ------------------------
+async def send_vitamin_reminder(bot: Bot, chat_id: int, target_date: date) -> None:
+    """The daily question with one dated ✅ button: no FSM, no database writes.
+
+    The scheduler has already checked that this day is not confirmed yet; the
+    day itself travels in the callback data, so the tap still means the same
+    evening hours later or after a restart."""
     try:
-        await bot.send_message(chat_id, texts.VITAMIN_REMINDER)
-        logger.info("Sent vitamin reminder to chat %s", chat_id)
+        await bot.send_message(
+            chat_id,
+            texts.VITAMIN_REMINDER,
+            reply_markup=keyboards.vitamin_reminder_keyboard(target_date),
+        )
+        logger.info("Sent vitamin reminder for %s to chat %s", target_date, chat_id)
     except TelegramAPIError:
         logger.exception("Failed to send vitamin reminder to chat %s", chat_id)
