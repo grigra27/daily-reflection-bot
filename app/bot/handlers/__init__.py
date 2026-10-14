@@ -34,7 +34,7 @@ def build_root_router() -> Router:
     # After every FSM-driven router: its bare-number weight handler only
     # matches outside any flow.
     root.include_router(food.router)
-    # Callback-only: its "vit:yes:" prefix matches nothing else.
+    # Callback-only: its "vit:item:" / "vit:yes:" prefixes match nothing else.
     root.include_router(vitamins.router)
     # Last: only matches users who failed the allow-list filter above.
     root.include_router(start.unauthorized_router)

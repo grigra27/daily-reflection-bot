@@ -255,6 +255,10 @@ class VitaminLog(Base):
     vitamins were not taken", so this stays an adherence nudge rather than a
     medical tracker. ``vitamin_date`` is the day the reminder was *sent* for
     (baked into the button), ``taken_at`` the real moment of the tap.
+
+    Historical since v1.3.3, which asks per item and stores those separately in
+    ``vitamin_intakes``: a row here says nothing about which supplement was taken,
+    so it is never rewritten or expanded into item confirmations.
     """
 
     __tablename__ = "vitamin_logs"
