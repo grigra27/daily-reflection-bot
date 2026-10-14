@@ -81,6 +81,9 @@ class User(Base):
     vitamin_logs: Mapped[list[VitaminLog]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    vitamin_intakes: Mapped[list[VitaminIntake]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class MorningIntent(Base):
@@ -268,3 +271,32 @@ class VitaminLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     user: Mapped[User] = relationship(back_populates="vitamin_logs")
+
+
+class VitaminIntake(Base):
+    """One confirmed vitamin item per user per Reflection Day (v1.3.3).
+
+    The granular successor of ``VitaminLog``: one row per tapped item, so a day
+    with two of three items confirmed is stored as exactly that. ``item_code`` is
+    a stable catalog code from ``vitamin_service``, never the display label, so
+    renaming a label never rewrites history. A missing row means "no confirmation
+    recorded", never "this supplement was not taken".
+    """
+
+    __tablename__ = "vitamin_intakes"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "vitamin_date", "item_code", name="uq_vitamin_intake_user_date_item"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    vitamin_date: Mapped[date] = mapped_column(Date, nullable=False)
+    item_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped[User] = relationship(back_populates="vitamin_intakes")

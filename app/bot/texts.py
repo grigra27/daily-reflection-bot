@@ -259,13 +259,18 @@ REMINDER = (
     "Займёт меньше минуты."
 )
 
-# --- Vitamins (v1.3.1 reminder, v1.3.2 acknowledgement) ------------------------
-# The daily question and its single ✅ button. A tap replaces the message with
-# VITAMIN_TAKEN; VITAMIN_STALE only refuses a button from an older day. There is
-# deliberately no "No"/"Пропустить" answer: not tapping proves nothing.
-VITAMIN_REMINDER = "💊 Ты принял витамины?"
-VITAMIN_TAKEN = "✅ Витамины приняты."
+# --- Vitamins (v1.3.1 reminder, v1.3.2 ack, v1.3.3 granular checklist) --------
+# The evening question carries one button per catalog item (see ``VITAMIN_ITEMS``),
+# and each tap confirms only its own item. Once all three are confirmed the
+# message becomes VITAMIN_ALL_TAKEN and the keyboard goes away. VITAMIN_STALE and
+# VITAMIN_INVALID only refuse a button, they never record anything. VITAMIN_TAKEN
+# is the legacy v1.3.2 text, kept because old ✅ Да buttons may still be tapped.
+# There is deliberately no "No"/"Пропустить" answer: not tapping proves nothing.
+VITAMIN_REMINDER = "💊 Что из витаминов ты сегодня принял?"
+VITAMIN_ALL_TAKEN = "✅ Все витамины приняты."
 VITAMIN_STALE = "Эта кнопка уже устарела."
+VITAMIN_INVALID = "Эта кнопка больше не актуальна."
+VITAMIN_TAKEN = "✅ Витамины приняты."
 
 # --- Weekly ------------------------------------------------------------------
 WEEKLY_OFFER = "📖 Хочешь коротко подвести итог недели?"

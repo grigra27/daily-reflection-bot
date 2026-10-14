@@ -1,6 +1,6 @@
 """Scheduler for morning intentions, daily check-ins, reminders, (v1.3) the
-food focus, food checklist and Sunday weight prompts and (v1.3.1/1.3.2) the
-daily vitamin question.
+food focus, food checklist and Sunday weight prompts and (v1.3.1–v1.3.3) the
+daily vitamin checklist.
 
 Uses a repeating cron trigger **per user and per job kind** (never a
 manually-enumerated job per calendar day — baseline section 38) evaluated in
@@ -144,24 +144,30 @@ class ReflectionScheduler:
             return
         await notifications.send_weight_prompt(self._bot, chat_id)
 
-    # -- vitamins (v1.3.1 reminder, v1.3.2 acknowledgement) -------------------
+    # -- vitamins (v1.3.1 reminder, v1.3.2 ack, v1.3.3 granular checklist) ------
     async def _vitamin_reminder_job(self, user_pk: int) -> None:
-        """One question per Reflection Day: a day already confirmed by a tap is
-        never asked again, so a refire or accidental reschedule cannot duplicate
-        it. Wall-clock only — the presence of a DailyEntry or FoodDay is
-        irrelevant. Re-checks the DB flags at fire time, but a disabled user
-        normally has no job at all (see ``sync_user``)."""
+        """One checklist per Reflection Day, showing the items still unconfirmed.
+
+        A day is asked at most once: it is closed either by the three granular
+        confirmations or, for the transition period right after the v1.3.3 deploy,
+        by the legacy v1.3.2 generic acknowledgement — that user already answered
+        the question production asked them, and asking again would be noise.
+        Wall-clock only — the presence of a DailyEntry or FoodDay is irrelevant.
+        Re-checks the DB flags at fire time, but a disabled user normally has no
+        job at all (see ``sync_user``)."""
         with session_scope(self._session_factory) as session:
             user = session.get(User, user_pk)
             if user is None or not user.is_active or not user.vitamin_reminder_enabled:
                 return
             chat_id = user.telegram_user_id
             target_date = reflection_day(user.timezone)
-            already = vitamin_service.is_taken(session, user, target_date)
-        if already:
+            legacy_answer = vitamin_service.is_taken(session, user, target_date)
+            taken_items = vitamin_service.get_taken_items(session, user, target_date)
+            all_taken = vitamin_service.all_items_taken(session, user, target_date)
+        if legacy_answer or all_taken:
             logger.info("Vitamin reminder skipped for user %s: already confirmed today", user_pk)
             return
-        await notifications.send_vitamin_reminder(self._bot, chat_id, target_date)
+        await notifications.send_vitamin_reminder(self._bot, chat_id, target_date, taken_items)
 
     # -- job management -----------------------------------------------------
     def _add_job(
