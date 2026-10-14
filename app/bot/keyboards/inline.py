@@ -13,6 +13,7 @@ from enum import Enum, auto
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot import texts
+from app.services.vitamin_service import VITAMIN_ITEMS
 
 SCORES = (1, 2, 3, 4, 5)
 
@@ -310,17 +311,26 @@ def food_rules_settings_keyboard(active: list[str], catalog: tuple[str, ...]) ->
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# --- Vitamins (v1.3.2) ----------------------------------------------------------
-def vitamin_reminder_keyboard(target_date: date) -> InlineKeyboardMarkup:
-    """The one ✅ button of the daily vitamin question.
+# --- Vitamins (v1.3.2 single ack, v1.3.3 granular checklist) -------------------
+def vitamin_reminder_keyboard(target_date: date, taken_items: list[str]) -> InlineKeyboardMarkup:
+    """One button per vitamin item, always in catalog order.
 
-    The Reflection Day is baked into the callback (``vit:yes:2026-10-07``), so a
-    tap hours later or after a restart still belongs to the evening it was asked
-    about. There is no "Нет"/"Позже" control: not tapping records nothing.
+    Confirmed items read ✅, the rest ⬜, and each button keeps its own dated
+    callback (``vit:item:omega_3:2026-10-14``), so a tap hours later or after a
+    restart still belongs to the evening it was asked about. There is no
+    "Нет"/"Позже" control and no way to un-check an item: not tapping records
+    nothing, tapping records once.
     """
     day = target_date.isoformat()
+    taken = set(taken_items)
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Да", callback_data=f"vit:yes:{day}")]
+            [
+                InlineKeyboardButton(
+                    text=f"{'✅' if code in taken else '⬜'} {label}",
+                    callback_data=f"vit:item:{code}:{day}",
+                )
+            ]
+            for code, label in VITAMIN_ITEMS
         ]
     )

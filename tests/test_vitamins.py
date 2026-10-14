@@ -1,11 +1,13 @@
-"""v1.3.1 vitamins reminder + v1.3.2 acknowledgement: the daily question, its
-dated ✅ button, the stored confirmation, scheduler job and sync semantics,
-settings service/validation/render, /settings handlers and migrations 0005/0006.
+"""v1.3.1 vitamins reminder + v1.3.2 generic acknowledgement + v1.3.3 granular
+checklist: the daily question, its three dated item buttons, the stored
+confirmations, scheduler job and sync semantics, settings service/validation/
+render, /settings handlers and migrations 0005/0006/0007.
 
 The reminder is deliberately *not* a reflection flow: exactly one question per
-day in the user's own timezone, one button, and a disabled reminder means the
-job is removed from the scheduler outright. A tap records the day it was asked
-for and nothing else — there is no "not taken" value, no streak and no stats.
+day in the user's own timezone, three independent confirmations, and a disabled
+reminder means the job is removed from the scheduler outright. A tap records the
+item on the day it was asked for and nothing else — there is no "not taken"
+value, no streak and no stats.
 """
 
 from __future__ import annotations
@@ -16,17 +18,24 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.orm import Session
 
+import app.runtime as runtime_module
 from app.bot import keyboards, notifications, texts
 from app.bot.handlers import build_root_router
 from app.bot.handlers import settings as settings_handlers
 from app.bot.handlers import start as start_handlers
 from app.bot.handlers import vitamins as vitamins_handlers
 from app.bot.states import SettingsStates
-from app.database.models import User, VitaminLog
-from app.database.repositories import UserRepository, VitaminLogRepository
+from app.database.models import User, VitaminIntake, VitaminLog
+from app.database.repositories import (
+    UserRepository,
+    VitaminIntakeRepository,
+    VitaminLogRepository,
+)
 from app.database.session import session_scope
+from app.runtime import Runtime, init_runtime
 from app.scheduler.scheduler import ReflectionScheduler
 from app.services import settings_service, vitamin_service
 from app.services.settings_service import InvalidSettingError
@@ -35,7 +44,11 @@ from app.services.vitamin_service import VitaminDateError
 from tests.test_food import AlertCallback
 from tests.test_handlers import (
     BOT_TG_ID,
+    AnyBot,
+    FakeChat,
+    FakeMessage,
     FakeState,
+    FakeUser,
     app_runtime,  # noqa: F401  (pytest fixture, imported for reuse)
     bot_message,
     callback,
@@ -68,27 +81,87 @@ def _log_dates(session_factory, telegram_user_id: int) -> list[date]:
         ]
 
 
+def _intakes(session_factory, telegram_user_id: int) -> list[tuple[date, str]]:
+    """Confirmed items in tap order — the database keeps history, not layout."""
+    with session_scope(session_factory) as s:
+        user = UserRepository(s).get_by_telegram_id(telegram_user_id)
+        if user is None:
+            return []
+        return [
+            (row.vitamin_date, row.item_code)
+            for row in s.query(VitaminIntake)
+            .filter_by(user_id=user.id)
+            .order_by(VitaminIntake.id)
+        ]
+
+
+def _buttons(markup) -> list[tuple[str, str]]:
+    if markup is None:
+        return []
+    return [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row]
+
+
+def _checklist(markup) -> list[str]:
+    """Rendered labels of a checklist keyboard, [] once it is removed entirely."""
+    return [text for text, _data in _buttons(markup)]
+
+
 # --------------------------------------------------------------------------
-# 19. The notification itself (v1.3.2: a question with one dated button)
+# 19, 27. The notification itself (v1.3.3: a question with three item buttons)
 # --------------------------------------------------------------------------
-async def test_send_vitamin_reminder_asks_with_one_dated_button() -> None:
+async def test_send_vitamin_reminder_asks_with_three_dated_buttons() -> None:
     bot = FakeBot()
-    target = date(2026, 10, 7)
-    await notifications.send_vitamin_reminder(bot, 111, target)  # type: ignore[arg-type]
-    assert texts.VITAMIN_REMINDER == "💊 Ты принял витамины?"
+    target = date(2026, 10, 14)
+    await notifications.send_vitamin_reminder(bot, 111, target, [])  # type: ignore[arg-type]
+    assert texts.VITAMIN_REMINDER == "💊 Что из витаминов ты сегодня принял?"
     assert bot.sent == [(111, texts.VITAMIN_REMINDER)]
-    buttons = [b for row in bot.kwargs[0]["reply_markup"].inline_keyboard for b in row]
-    assert [(b.text, b.callback_data) for b in buttons] == [("✅ Да", "vit:yes:2026-10-07")]
+    assert _buttons(bot.kwargs[0]["reply_markup"]) == [
+        ("⬜ Витамин D", "vit:item:vitamin_d:2026-10-14"),
+        ("⬜ Омега-3", "vit:item:omega_3:2026-10-14"),
+        ("⬜ Opti-Men", "vit:item:opti_men:2026-10-14"),
+    ]
 
 
-def test_vitamin_reminder_keyboard_is_exactly_one_button() -> None:
-    markup = keyboards.vitamin_reminder_keyboard(date(2026, 10, 7))
-    buttons = [b for row in markup.inline_keyboard for b in row]
-    assert len(buttons) == 1
-    assert buttons[0].text == "✅ Да"
-    # The day is baked in, stateless and well under Telegram's 64-byte cap.
-    assert buttons[0].callback_data == "vit:yes:2026-10-07"
-    assert len(buttons[0].callback_data.encode()) <= 64
+async def test_send_vitamin_reminder_shows_the_already_confirmed_items() -> None:
+    # A checklist sent after a partial evening must not ask for what is stored.
+    bot = FakeBot()
+    await notifications.send_vitamin_reminder(  # type: ignore[call-arg]
+        bot, 111, date(2026, 10, 14), ["omega_3"]
+    )
+    assert _checklist(bot.kwargs[0]["reply_markup"]) == [
+        "⬜ Витамин D",
+        "✅ Омега-3",
+        "⬜ Opti-Men",
+    ]
+
+
+def test_vitamin_reminder_keyboard_is_three_buttons_in_catalog_order() -> None:
+    markup = keyboards.vitamin_reminder_keyboard(date(2026, 10, 14), ["opti_men"])
+    rows = markup.inline_keyboard
+    # One item per line: a single compact message, never three messages.
+    assert [len(row) for row in rows] == [1, 1, 1]
+    assert _checklist(markup) == ["⬜ Витамин D", "⬜ Омега-3", "✅ Opti-Men"]
+    data = [b.callback_data for row in rows for b in row]
+    assert data == [
+        "vit:item:vitamin_d:2026-10-14",
+        "vit:item:omega_3:2026-10-14",
+        "vit:item:opti_men:2026-10-14",
+    ]
+    # Stable codes and dates only, stateless and well under Telegram's 64-byte cap.
+    assert all(len(b.callback_data.encode()) <= 64 for row in rows for b in row)
+
+
+def test_vitamin_catalog_is_exactly_three_stable_items() -> None:
+    assert vitamin_service.VITAMIN_ITEMS == (
+        ("vitamin_d", "Витамин D"),
+        ("omega_3", "Омега-3"),
+        ("opti_men", "Opti-Men"),
+    )
+    assert vitamin_service.ITEM_COUNT == 3
+    assert vitamin_service.item_label("omega_3") == "Омега-3"
+    assert vitamin_service.validate_item("vitamin_d") is True
+    assert vitamin_service.validate_item("витамин_d") is False
+    assert vitamin_service.validate_item("") is False
 
 
 # --------------------------------------------------------------------------
@@ -670,16 +743,15 @@ def test_vitamins_router_is_registered_before_the_catch_all() -> None:
     names = [router.name for router in build_root_router().sub_routers]
     assert "vitamins" in names
     assert names.index("vitamins") < names.index("unauthorized")
-    # Exactly one callback route, bound to the "vit:yes:" prefix.
-    handlers = vitamins_handlers.router.callback_query.handlers
-    assert len(handlers) == 1
-    assert vitamins_handlers.cb_confirm in [h.callback for h in handlers]
+    # Two callback routes: the granular item buttons and the legacy v1.3.2 one.
+    handlers = [h.callback for h in vitamins_handlers.router.callback_query.handlers]
+    assert handlers == [vitamins_handlers.cb_confirm_item, vitamins_handlers.cb_confirm]
 
 
 # --------------------------------------------------------------------------
 # 15, 36. The scheduler asks once and stops asking once confirmed
 # --------------------------------------------------------------------------
-async def test_vitamin_job_sends_the_question_with_the_dated_button(
+async def test_vitamin_job_sends_the_question_with_the_dated_buttons(
     session, session_factory
 ) -> None:
     u = _mk_user(session)
@@ -687,8 +759,18 @@ async def test_vitamin_job_sends_the_question_with_the_dated_button(
     sched = ReflectionScheduler(session_factory, bot)  # type: ignore[arg-type]
     await sched._vitamin_reminder_job(u.id)
 
+    day = reflection_day(u.timezone).isoformat()
     assert bot.sent == [(u.telegram_user_id, texts.VITAMIN_REMINDER)]
-    assert bot.buttons == [f"vit:yes:{reflection_day(u.timezone).isoformat()}"]
+    assert bot.buttons == [
+        f"vit:item:vitamin_d:{day}",
+        f"vit:item:omega_3:{day}",
+        f"vit:item:opti_men:{day}",
+    ]
+    assert _checklist(bot.kwargs[0]["reply_markup"]) == [
+        "⬜ Витамин D",
+        "⬜ Омега-3",
+        "⬜ Opti-Men",
+    ]
 
 
 async def test_vitamin_job_skips_an_already_confirmed_day(
@@ -747,7 +829,8 @@ def test_v131_database_upgrades_to_the_log_table_without_losing_anything(
     _build_v131_db(db)
     before = _v13_snapshot(db)
 
-    _alembic(db, "upgrade", "head")
+    # Explicitly to 0006, the v1.3.2 head: the chain below it must stay intact.
+    _alembic(db, "upgrade", "0006_vitamin_log")
 
     assert "vitamin_logs" in _tables(db)
     assert _v13_snapshot(db) == before
@@ -827,3 +910,582 @@ def test_vitamin_logs_downgrade_and_reupgrade(tmp_path: Path) -> None:
     _alembic(db, "upgrade", "head")
     assert "vitamin_logs" in _tables(db)
     assert _v13_snapshot(db)["counts"] == _V13_COUNTS
+
+
+# ==========================================================================
+# v1.3.3 — the granular checklist: three separate acknowledgements
+# ==========================================================================
+
+_ITEMS = [code for code, _label in vitamin_service.VITAMIN_ITEMS]
+
+#: Telegram's exact words for an edit that would not change anything.
+_NOT_MODIFIED = TelegramBadRequest(
+    "editMessageText",
+    "Bad Request: message is not modified: specified new message content and reply "
+    "markup are exactly the same as a current content and reply markup of the message",
+)
+
+
+class _RejectingMessage(FakeMessage):
+    """The bot's reminder message, answering every edit with one Telegram error."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(FakeChat(111), FakeUser(BOT_TG_ID))
+        self._error = error
+
+    async def edit_text(self, text: str, reply_markup=None, **kwargs) -> None:
+        self.edits.append(text)
+        self.edit_markups.append(reply_markup)
+        raise self._error
+
+
+# --------------------------------------------------------------------------
+# 4, 9, 22-24. The service: one row per item, canonical order, no un-check
+# --------------------------------------------------------------------------
+def test_each_item_is_recorded_separately_and_read_in_catalog_order(
+    session: Session, user: User
+) -> None:
+    day = _today()
+    # Tapped in the reverse order: the catalog, not the database, decides how the
+    # checklist renders.
+    vitamin_service.mark_item_taken(session, user, day, "opti_men")
+    vitamin_service.mark_item_taken(session, user, day, "vitamin_d")
+
+    assert vitamin_service.get_taken_items(session, user, day) == ["vitamin_d", "opti_men"]
+    assert vitamin_service.is_item_taken(session, user, day, "vitamin_d") is True
+    assert vitamin_service.is_item_taken(session, user, day, "omega_3") is False
+    # One tap is deliberately NOT a closed day.
+    assert vitamin_service.all_items_taken(session, user, day) is False
+
+    vitamin_service.mark_item_taken(session, user, day, "omega_3")
+    assert vitamin_service.all_items_taken(session, user, day) is True
+    assert session.query(VitaminIntake).count() == 3
+
+
+def test_unknown_item_is_refused_without_writing(session: Session, user: User) -> None:
+    with pytest.raises(vitamin_service.VitaminItemError):
+        vitamin_service.mark_item_taken(session, user, _today(), "vitamin_c")
+    assert session.query(VitaminIntake).count() == 0
+
+
+def test_items_on_different_days_are_independent(session: Session, user: User) -> None:
+    day = _today()
+    vitamin_service.mark_item_taken(session, user, day, "vitamin_d")
+    vitamin_service.mark_item_taken(session, user, day - timedelta(days=1), "omega_3")
+
+    assert vitamin_service.get_taken_items(session, user, day) == ["vitamin_d"]
+    assert vitamin_service.get_taken_items(session, user, day - timedelta(days=1)) == ["omega_3"]
+
+
+def test_repository_writes_no_second_row_for_a_racing_item_tap(
+    session: Session, user: User
+) -> None:
+    repo = VitaminIntakeRepository(session)
+    day = date(2026, 10, 5)
+    moment = datetime(2026, 10, 5, 19, 0, tzinfo=UTC)
+    repo.mark_taken(user_id=user.id, vitamin_date=day, item_code="omega_3", taken_at=moment)
+    later = repo.mark_taken(
+        user_id=user.id,
+        vitamin_date=day,
+        item_code="omega_3",
+        taken_at=moment + timedelta(minutes=30),
+    )
+
+    # The first tap is the fact that gets remembered, per item.
+    assert later.taken_at == moment.replace(tzinfo=None)
+    assert session.query(VitaminIntake).count() == 1
+
+
+def test_every_item_keeps_its_own_first_timestamp(session: Session, user: User) -> None:
+    # The v1.3.2 midnight scenario: the question goes out at 22:00 MSK on Oct 14,
+    # the bot restarts, and the remaining taps land at 00:40 and 01:15 MSK. The
+    # day comes from the button, each taken_at from the moment of that tap.
+    target = date(2026, 10, 14)
+    taps = {
+        "vitamin_d": datetime(2026, 10, 14, 19, 10, tzinfo=UTC),
+        "omega_3": datetime(2026, 10, 14, 21, 40, tzinfo=UTC),
+        "opti_men": datetime(2026, 10, 14, 22, 15, tzinfo=UTC),
+    }
+    for code, when in taps.items():
+        assert reflection_day(user.timezone, when) == target
+        row = vitamin_service.mark_item_taken(session, user, target, code, now=when)
+        assert row.vitamin_date == target
+
+    stored = {
+        row.item_code: row.taken_at.replace(tzinfo=None)
+        for row in session.query(VitaminIntake).order_by(VitaminIntake.id)
+    }
+    assert stored == {code: when.replace(tzinfo=None) for code, when in taps.items()}
+
+    # A repeat tap on Omega an hour later changes nothing about its time.
+    again = vitamin_service.mark_item_taken(
+        session, user, target, "omega_3", now=datetime(2026, 10, 14, 22, 40, tzinfo=UTC)
+    )
+    assert again.taken_at.replace(tzinfo=None) == taps["omega_3"].replace(tzinfo=None)
+    assert session.query(VitaminIntake).count() == 3
+
+
+@pytest.mark.parametrize("item", _ITEMS)
+@pytest.mark.parametrize(("delta", "allowed"), [(0, True), (-1, True), (-2, False), (1, False)])
+def test_every_item_shares_the_acknowledgement_window(
+    session: Session, user: User, item: str, delta: int, allowed: bool
+) -> None:
+    now = datetime(2026, 10, 8, 6, 0, tzinfo=UTC)
+    assert reflection_day(user.timezone, now) == date(2026, 10, 8)
+    target = date(2026, 10, 8) + timedelta(days=delta)
+
+    if allowed:
+        row = vitamin_service.mark_item_taken(session, user, target, item, now=now)
+        assert (row.vitamin_date, row.item_code) == (target, item)
+    else:
+        with pytest.raises(VitaminDateError):
+            vitamin_service.mark_item_taken(session, user, target, item, now=now)
+        assert vitamin_service.get_taken_items(session, user, target) == []
+        assert session.query(VitaminIntake).count() == 0
+
+
+# --------------------------------------------------------------------------
+# 28, 2, 24. The handler: the same message is re-rendered after every tap
+# --------------------------------------------------------------------------
+async def test_three_taps_walk_the_checklist_to_completion(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    day = _today()
+    # One and the same Telegram message is updated in place, not re-sent.
+    message = bot_message(111)
+
+    await vitamins_handlers.cb_confirm_item(AlertCallback(f"vit:item:vitamin_d:{day}", 111, message))
+    assert _checklist(message.edit_markups[-1]) == ["✅ Витамин D", "⬜ Омега-3", "⬜ Opti-Men"]
+    assert _intakes(session_factory, 111) == [(day, "vitamin_d")]
+
+    await vitamins_handlers.cb_confirm_item(AlertCallback(f"vit:item:omega_3:{day}", 111, message))
+    assert _checklist(message.edit_markups[-1]) == ["✅ Витамин D", "✅ Омега-3", "⬜ Opti-Men"]
+    assert _intakes(session_factory, 111) == [(day, "vitamin_d"), (day, "omega_3")]
+
+    final = AlertCallback(f"vit:item:opti_men:{day}", 111, message)
+    await vitamins_handlers.cb_confirm_item(final)
+
+    assert texts.VITAMIN_ALL_TAKEN == "✅ Все витамины приняты."
+    assert message.edits == [
+        texts.VITAMIN_REMINDER,
+        texts.VITAMIN_REMINDER,
+        texts.VITAMIN_ALL_TAKEN,
+    ]
+    # The checklist was on screen for the first two taps and gone after the third.
+    assert all(markup is not None for markup in message.edit_markups[:-1])
+    assert message.edit_markups[-1] is None
+    assert _checklist(message.edit_markups[-1]) == []
+    assert final.message is message
+    assert _intakes(session_factory, 111) == [
+        (day, "vitamin_d"),
+        (day, "omega_3"),
+        (day, "opti_men"),
+    ]
+
+
+async def test_repeat_tap_is_idempotent_and_never_unchecks(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    day = _today()
+    data = f"vit:item:vitamin_d:{day}"
+    first = _cb(data)
+    await vitamins_handlers.cb_confirm_item(first)
+
+    again = _cb(data)
+    await vitamins_handlers.cb_confirm_item(again)
+
+    assert again.answered == 1
+    assert again.alerts == []
+    # Tapping an ✅ item again keeps it ✅: this is an acknowledgement, not a toggle.
+    assert _checklist(again.message.edit_markups[-1]) == ["✅ Витамин D", "⬜ Омега-3", "⬜ Opti-Men"]
+    assert _intakes(session_factory, 111) == [(day, "vitamin_d")]
+
+
+async def test_yesterdays_item_button_still_confirms_yesterday(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    yesterday = _today() - timedelta(days=1)
+    await vitamins_handlers.cb_confirm_item(_cb(f"vit:item:omega_3:{yesterday}"))
+    assert _intakes(session_factory, 111) == [(yesterday, "omega_3")]
+
+
+@pytest.mark.parametrize("item", _ITEMS)
+@pytest.mark.parametrize("delta", [-2, 1])
+async def test_stale_or_future_item_tap_alerts_and_writes_nothing(
+    app_runtime, session_factory, item: str, delta: int  # noqa: F811
+) -> None:
+    cb = _cb(f"vit:item:{item}:{_today() + timedelta(days=delta)}")
+    await vitamins_handlers.cb_confirm_item(cb)
+
+    assert cb.alerts == [texts.VITAMIN_STALE]
+    assert cb.message.edits == []
+    assert _intakes(session_factory, 111) == []
+
+
+@pytest.mark.parametrize("item", _ITEMS)
+@pytest.mark.parametrize("delta", [0, -1])
+async def test_current_or_previous_day_item_tap_is_recorded(
+    app_runtime, session_factory, item: str, delta: int  # noqa: F811
+) -> None:
+    day = _today() + timedelta(days=delta)
+    cb = _cb(f"vit:item:{item}:{day}")
+    await vitamins_handlers.cb_confirm_item(cb)
+
+    assert cb.alerts == []
+    assert cb.answered == 1
+    assert _intakes(session_factory, 111) == [(day, item)]
+
+
+async def test_item_tap_records_the_tapper_not_the_message_author(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    # cb.from_user is 222, while cb.message.from_user is the bot (777).
+    day = _today()
+    await vitamins_handlers.cb_confirm_item(_cb(f"vit:item:vitamin_d:{day}", user_id=222))
+
+    assert _intakes(session_factory, 222) == [(day, "vitamin_d")]
+    assert _intakes(session_factory, 111) == []
+    with session_scope(session_factory) as s:
+        assert UserRepository(s).get_by_telegram_id(BOT_TG_ID) is None
+
+
+# --------------------------------------------------------------------------
+# 21. Buttons that are not in the catalog
+# --------------------------------------------------------------------------
+async def test_item_outside_the_catalog_is_refused_neutrally(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    cb = _cb(f"vit:item:vitamin_c:{_today()}")
+    await vitamins_handlers.cb_confirm_item(cb)
+
+    assert texts.VITAMIN_INVALID == "Эта кнопка больше не актуальна."
+    assert cb.alerts == [texts.VITAMIN_INVALID]
+    assert cb.message.edits == []
+    assert _intakes(session_factory, 111) == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        "vit:item:vitamin_d",  # no date at all
+        "vit:item:vitamin_d:not-a-date",
+        "vit:item:vitamin_d:2026-13-01",
+        "vit:item:vitamin_d:2026-10-14:surprise",  # wrong shape
+        "vit:item::2026-10-14",  # no code
+    ],
+)
+async def test_malformed_item_callback_is_refused(
+    app_runtime, session_factory, data: str  # noqa: F811
+) -> None:
+    cb = _cb(data)
+    await vitamins_handlers.cb_confirm_item(cb)
+    assert cb.alerts == [texts.VITAMIN_INVALID]
+    assert cb.message.edits == []
+    assert _intakes(session_factory, 111) == []
+
+
+# --------------------------------------------------------------------------
+# 14, 31. The Telegram edge the v1.3.2 review left open
+# --------------------------------------------------------------------------
+async def test_repeat_tap_survives_message_is_not_modified(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    # Re-tapping an already-rendered state produces an identical message, which
+    # Telegram reports as an error. The wanted state is already on screen.
+    day = _today()
+    data = f"vit:item:vitamin_d:{day}"
+    await vitamins_handlers.cb_confirm_item(_cb(data))
+
+    cb = AlertCallback(data, 111, _RejectingMessage(_NOT_MODIFIED))
+    await vitamins_handlers.cb_confirm_item(cb)
+
+    assert cb.answered == 1
+    assert cb.message.edits == [texts.VITAMIN_REMINDER]
+    assert _intakes(session_factory, 111) == [(day, "vitamin_d")]
+
+
+async def test_completion_survives_message_is_not_modified(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    # The third tap of a checklist that was somehow already fully rendered.
+    for item in _ITEMS[:-1]:
+        await vitamins_handlers.cb_confirm_item(_cb(f"vit:item:{item}:{_today()}"))
+
+    cb = AlertCallback(f"vit:item:{_ITEMS[-1]}:{_today()}", 111, _RejectingMessage(_NOT_MODIFIED))
+    await vitamins_handlers.cb_confirm_item(cb)
+
+    assert cb.message.edits == [texts.VITAMIN_ALL_TAKEN]
+    assert len(_intakes(session_factory, 111)) == 3
+
+
+async def test_any_other_telegram_edit_error_still_propagates(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    # Only the no-op complaint is tolerated; nothing else is swallowed.
+    cb = AlertCallback(
+        f"vit:item:vitamin_d:{_today()}",
+        111,
+        _RejectingMessage(TelegramBadRequest("editMessageText", "Bad Request: chat not found")),
+    )
+    with pytest.raises(TelegramBadRequest, match="chat not found"):
+        await vitamins_handlers.cb_confirm_item(cb)
+    # The tap itself was already persisted before the render failed.
+    assert len(_intakes(session_factory, 111)) == 1
+
+
+# --------------------------------------------------------------------------
+# 12, 22, 29. A partial evening across a restart, with no FSM anywhere
+# --------------------------------------------------------------------------
+async def test_partial_evening_survives_a_restart(settings, session_factory) -> None:
+    def fresh_runtime() -> Runtime:
+        # What a restart gives: a brand new runtime, scheduler and storage over
+        # the same database file.
+        return Runtime(
+            settings=settings,
+            engine=session_factory.kw["bind"],
+            session_factory=session_factory,
+            scheduler=ReflectionScheduler(session_factory, AnyBot()),  # type: ignore[arg-type]
+            bot=AnyBot(),  # type: ignore[arg-type]
+        )
+
+    day = _today()
+    init_runtime(fresh_runtime())
+    try:
+        await vitamins_handlers.cb_confirm_item(_cb(f"vit:item:vitamin_d:{day}"))
+
+        init_runtime(fresh_runtime())
+        assert "state" not in inspect.signature(vitamins_handlers.cb_confirm_item).parameters
+
+        cb = _cb(f"vit:item:omega_3:{day}")
+        await vitamins_handlers.cb_confirm_item(cb)
+    finally:
+        runtime_module._runtime = None
+
+    assert _intakes(session_factory, 111) == [(day, "vitamin_d"), (day, "omega_3")]
+    assert _checklist(cb.message.edit_markups[-1]) == ["✅ Витамин D", "✅ Омега-3", "⬜ Opti-Men"]
+
+
+# --------------------------------------------------------------------------
+# 16, 17, 34. The legacy v1.3.2 generic button keeps working
+# --------------------------------------------------------------------------
+async def test_legacy_yes_button_confirms_generically_and_stays_legacy(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    day = _today()
+    cb = _cb(f"vit:yes:{day}")
+    await vitamins_handlers.cb_confirm(cb)
+
+    assert cb.alerts == []
+    assert cb.answered == 1
+    assert cb.message.edits == [texts.VITAMIN_TAKEN]  # the old success text
+    assert cb.message.edit_markups == [None]
+    assert _log_dates(session_factory, 111) == [day]
+    # A generic tap said nothing about which supplement: no items are invented.
+    assert _intakes(session_factory, 111) == []
+
+
+async def test_legacy_stale_button_still_refused(app_runtime, session_factory) -> None:  # noqa: F811
+    cb = _cb(f"vit:yes:{_today() - timedelta(days=2)}")
+    await vitamins_handlers.cb_confirm(cb)
+    assert cb.alerts == [texts.VITAMIN_STALE]
+    assert _log_dates(session_factory, 111) == []
+    assert _intakes(session_factory, 111) == []
+
+
+async def test_legacy_repeat_tap_survives_message_is_not_modified(
+    app_runtime, session_factory  # noqa: F811
+) -> None:
+    day = _today()
+    await vitamins_handlers.cb_confirm(_cb(f"vit:yes:{day}"))
+
+    cb = AlertCallback(f"vit:yes:{day}", 111, _RejectingMessage(_NOT_MODIFIED))
+    await vitamins_handlers.cb_confirm(cb)
+
+    assert cb.message.edits == [texts.VITAMIN_TAKEN]
+    assert _log_dates(session_factory, 111) == [day]
+
+
+# --------------------------------------------------------------------------
+# 18, 35. The scheduler asks the granular question at most once per day
+# --------------------------------------------------------------------------
+async def test_vitamin_job_marks_a_half_confirmed_day_in_the_checklist(
+    session, session_factory
+) -> None:
+    u = _mk_user(session)
+    vitamin_service.mark_item_taken(session, u, reflection_day(u.timezone), "vitamin_d")
+
+    bot = FakeBot()
+    await ReflectionScheduler(session_factory, bot)._vitamin_reminder_job(u.id)  # type: ignore[arg-type]
+
+    assert bot.sent == [(u.telegram_user_id, texts.VITAMIN_REMINDER)]
+    assert _checklist(bot.kwargs[0]["reply_markup"]) == [
+        "✅ Витамин D",
+        "⬜ Омега-3",
+        "⬜ Opti-Men",
+    ]
+
+
+async def test_vitamin_job_stops_asking_once_all_three_items_are_confirmed(
+    session, session_factory
+) -> None:
+    u = _mk_user(session)
+    day = reflection_day(u.timezone)
+    for item in _ITEMS:
+        vitamin_service.mark_item_taken(session, u, day, item)
+
+    bot = FakeBot()
+    await ReflectionScheduler(session_factory, bot)._vitamin_reminder_job(u.id)  # type: ignore[arg-type]
+    assert bot.sent == []
+
+
+async def test_legacy_acknowledgement_closes_the_day_without_becoming_items(
+    session, session_factory
+) -> None:
+    # Transition rule: this evening was already answered in production, so the
+    # granular checklist is not sent for it — and the old row is not reinterpreted.
+    u = _mk_user(session)
+    vitamin_service.mark_taken(session, u, reflection_day(u.timezone))
+
+    bot = FakeBot()
+    await ReflectionScheduler(session_factory, bot)._vitamin_reminder_job(u.id)  # type: ignore[arg-type]
+
+    assert bot.sent == []
+    with session_scope(session_factory) as s:
+        assert s.query(VitaminIntake).count() == 0
+        assert s.query(VitaminLog).count() == 1
+
+
+# --------------------------------------------------------------------------
+# 36. Migration 0006 -> 0007 over a production-shaped v1.3.2 database
+# --------------------------------------------------------------------------
+def _build_v132_db(db: Path) -> None:
+    """A v1.3.2 database as production has it: all v1.3 data plus a legacy log."""
+    _build_v131_db(db)
+    _alembic(db, "upgrade", "0006_vitamin_log")
+    assert "vitamin_logs" in _tables(db)
+    con = sqlite3.connect(db)
+    try:
+        con.executescript(
+            """
+            INSERT INTO vitamin_logs (user_id, vitamin_date, taken_at, created_at)
+            VALUES (1, '2026-10-06', '2026-10-06 19:05:00', '2026-10-06 19:05:00'),
+                   (1, '2026-10-07', '2026-10-07 22:03:00', '2026-10-07 22:03:00');
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _vitamin_logs(db: Path) -> list[tuple]:
+    con = sqlite3.connect(db)
+    try:
+        return con.execute("SELECT * FROM vitamin_logs ORDER BY id").fetchall()
+    finally:
+        con.close()
+
+
+def test_v132_database_upgrades_to_granular_items_without_losing_anything(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "v132.db"
+    _build_v132_db(db)
+    before = _v13_snapshot(db)
+    legacy_before = _vitamin_logs(db)
+    assert len(legacy_before) == 2
+
+    _alembic(db, "upgrade", "0007_vitamin_intakes")
+
+    assert _v13_snapshot(db) == before
+    assert _v13_snapshot(db)["counts"] == _V13_COUNTS
+    # The legacy generic acknowledgements stay exactly as they were.
+    assert _vitamin_logs(db) == legacy_before
+    assert {"id", "user_id", "vitamin_date", "item_code", "taken_at", "created_at"} == _columns(
+        db, "vitamin_intakes"
+    )
+    con = sqlite3.connect(db)
+    try:
+        # The new table starts empty: nothing is backfilled from the old rows.
+        assert con.execute("SELECT COUNT(*) FROM vitamin_intakes").fetchone()[0] == 0
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "0007_vitamin_intakes",
+        )
+        indexes = {row[1] for row in con.execute("PRAGMA index_list('vitamin_intakes')")}
+        assert "ix_vitamin_intakes_user_id" in indexes
+    finally:
+        con.close()
+
+
+def test_granular_unique_constraint_is_enforced_by_the_database(tmp_path: Path) -> None:
+    db = tmp_path / "granular.db"
+    _alembic(db, "upgrade", "head")
+    con = sqlite3.connect(db)
+    con.execute("PRAGMA foreign_keys = ON")
+
+    def insert(user_id: int, day: str, code: str) -> None:
+        con.execute(
+            "INSERT INTO vitamin_intakes (user_id, vitamin_date, item_code, taken_at, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, day, code, f"{day} 19:00:00", f"{day} 19:00:00"),
+        )
+
+    try:
+        con.executescript(
+            "INSERT INTO users (telegram_user_id, display_name, is_active, timezone, "
+            "checkin_time, reminder_time, morning_time, food_morning_time, "
+            "food_evening_time, weight_time, vitamin_reminder_time, "
+            "vitamin_reminder_enabled, created_at, updated_at) "
+            "VALUES (111, 'A', 1, 'Europe/Moscow', '21:30', '23:00', '08:30', "
+            "'08:45', '22:30', '09:00', '22:00', 1, "
+            "'2026-10-14 08:00:00', '2026-10-14 08:00:00'), "
+            "(222, 'B', 1, 'Europe/Moscow', '21:30', '23:00', '08:30', "
+            "'08:45', '22:30', '09:00', '22:00', 1, "
+            "'2026-10-14 08:00:00', '2026-10-14 08:00:00')"
+        )
+        insert(1, "2026-10-14", "vitamin_d")
+        con.commit()
+
+        # The same item twice for the same user and day is the database's business.
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(1, "2026-10-14", "vitamin_d")
+        # Anything else is a different acknowledgement and is allowed.
+        insert(1, "2026-10-14", "omega_3")  # another item, same day
+        insert(1, "2026-10-13", "vitamin_d")  # same item, another day
+        insert(2, "2026-10-14", "vitamin_d")  # same day and item, another user
+        con.commit()
+        assert con.execute("SELECT COUNT(*) FROM vitamin_intakes").fetchone()[0] == 4
+    finally:
+        con.close()
+
+
+def test_vitamin_intakes_downgrade_and_reupgrade(tmp_path: Path) -> None:
+    db = tmp_path / "v132.db"
+    _build_v132_db(db)
+    _alembic(db, "upgrade", "head")
+    con = sqlite3.connect(db)
+    try:
+        con.execute(
+            "INSERT INTO vitamin_intakes (user_id, vitamin_date, item_code, taken_at, "
+            "created_at) VALUES (1, '2026-10-14', 'vitamin_d', "
+            "'2026-10-14 19:10:00', '2026-10-14 19:10:00')"
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    # Rolling back removes exactly the new table.
+    _alembic(db, "downgrade", "0006_vitamin_log")
+    assert "vitamin_intakes" not in _tables(db)
+    assert "vitamin_logs" in _tables(db)
+    assert _v13_snapshot(db)["counts"] == _V13_COUNTS
+    assert len(_vitamin_logs(db)) == 2
+
+    _alembic(db, "upgrade", "head")
+    assert "vitamin_intakes" in _tables(db)
+    assert _v13_snapshot(db)["counts"] == _V13_COUNTS
+    assert len(_vitamin_logs(db)) == 2
+    con = sqlite3.connect(db)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM vitamin_intakes").fetchone()[0] == 0
+    finally:
+        con.close()
