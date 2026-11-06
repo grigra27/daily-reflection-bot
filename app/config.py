@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = Field(alias="LLM_API_KEY", default=SecretStr(""))
     llm_base_url: str = Field(alias="LLM_BASE_URL", default="https://api.groq.com/openai/v1")
     llm_model: str = Field(alias="LLM_MODEL", default="qwen/qwen3.8-27b")
-    llm_timeout: float = Field(alias="LLM_TIMEOUT", default=45, ge=1, le=120)
+    llm_timeout: float = Field(alias="LLM_TIMEOUT", default=90, ge=1, le=120)
 
     @field_validator("allowed_telegram_ids_raw")
     @classmethod

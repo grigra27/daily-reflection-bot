@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "daily-reflection-bot"
-version = "1.4.0"
+version = "1.4.1"
 description = "Private Telegram reflection diary with weekly reviews and Groq analysis"
 requires-python = ">=3.12"
 dependencies = [

@@ -32,6 +32,7 @@ from app.database.models import (
 from app.database.session import session_scope
 from app.services import ai_review_service as ai
 from app.services import review_service as svc
+from app.services.ai_review_evidence import resolve_draft
 from app.services.auth_service import NotAuthorizedError
 from app.services.time_service import reflection_day
 from tests.test_handlers import (  # noqa: F401
@@ -66,14 +67,45 @@ def add_entries(session, user_id, n=3, text="Своя запись"):
     session.commit()
 
 
+def good_payload(d=START):
+    return {
+        "week_start": str(START),
+        "through": str(START + timedelta(days=6)),
+        "days": [
+            {
+                "date": str(d),
+                "scores": {"day": 4, "mood": 3, "energy": 2},
+                "note": None,
+                "intentions": [],
+            }
+        ],
+        "weekly_reflection": None,
+    }
+
+
+def good_draft(d=START):
+    sources = [{"source_id": f"{d}:scores", "quote": "День: 4/5; настроение: 3/5; энергия: 2/5."}]
+    return {
+        "observations": [
+            {
+                "text": "Удачный день может сочетаться с небольшим запасом сил. Стоит заметить, что помогает получать удовлетворение в таком состоянии.",
+                "sources": sources,
+            }
+        ],
+        "experiment": {
+            "text": "В следующем дневном итоге назови одно событие, сделавшее день удачным.",
+            "check": "Отметь, сопровождалось ли это большим запасом сил; отсутствие связи тоже результат.",
+            "sources": sources,
+        },
+        "question": {
+            "text": "Что помогает тебе считать день удачным при небольшом запасе сил?",
+            "sources": sources,
+        },
+    }
+
+
 def good_review(d=START):
-    return ai.Review.model_validate(
-        {
-            "observations": [{"text": "Энергия ниже оценки дня.", "dates": [d.isoformat()]}],
-            "experiment": {"text": "Попробуй оставить время для отдыха.", "dates": [d.isoformat()]},
-            "question": "Что помогло бы восстановиться?",
-        }
-    )
+    return resolve_draft(json.dumps(good_draft(d)), good_payload(d))
 
 
 def test_week_counts_missing_days_and_user_isolation(session, user):
@@ -165,7 +197,7 @@ def test_payload_excludes_profile_and_health_fields_and_bounds_text(session, use
 )
 def test_invalid_ai_output_is_rejected(bad):
     with pytest.raises(ValueError):
-        ai.validate_result(json.dumps(bad), {"days": [{"date": str(START)}]})
+        ai.validate_result(json.dumps(bad), good_payload())
 
 
 async def test_cache_concurrency_invalidation_and_users(
@@ -248,12 +280,16 @@ async def test_insufficient_data_and_provider_failure_not_cached(
     assert mock.await_count == 1 and session.query(WeeklyAnalysis).count() == 0
 
 
-@pytest.mark.parametrize("failure", [None, "429", "timeout", "json", "truncated", "large", "dates"])
-async def test_http_contract_bounded_response_and_safe_logs(settings, monkeypatch, caplog, failure):
+@pytest.mark.parametrize(
+    "failure", [None, "429", "timeout", "json", "truncated", "large", "generation", "schema"]
+)
+@pytest.mark.parametrize("model", ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"])
+async def test_http_contract_bounded_response_and_safe_logs(
+    settings, monkeypatch, caplog, failure, model
+):
+    settings.llm_model = model
     settings.llm_api_key = SecretStr("DO-NOT-LOG-KEY")
     content = good_review().model_dump_json()
-    if failure == "dates":
-        content = good_review(START - timedelta(days=1)).model_dump_json()
     body = json.dumps(
         {
             "choices": [
@@ -268,6 +304,15 @@ async def test_http_contract_bounded_response_and_safe_logs(settings, monkeypatc
         body = b"PRIVATE-JOURNAL"
     if failure == "large":
         body = b"x" * 70000
+    if failure in ("generation", "schema"):
+        body = json.dumps(
+            {
+                "error": {
+                    "code": "json_validate_failed" if failure == "generation" else "invalid_schema",
+                    "failed_generation": "PRIVATE-JOURNAL DO-NOT-LOG-KEY",
+                }
+            }
+        ).encode()
 
     class Stream:
         async def iter_chunked(self, n):
@@ -275,8 +320,11 @@ async def test_http_contract_bounded_response_and_safe_logs(settings, monkeypatc
                 yield body[i : i + 7]
 
     class Response:
-        status = 429 if failure == "429" else 200
+        status = 429 if failure == "429" else (400 if failure in ("generation", "schema") else 200)
         content = Stream()
+
+        def __init__(self):
+            self.headers = {}
 
         async def __aenter__(self):
             if failure == "timeout":
@@ -300,16 +348,21 @@ async def test_http_contract_bounded_response_and_safe_logs(settings, monkeypatc
             assert url == "https://api.groq.com/openai/v1/chat/completions"
             assert headers["Authorization"] == "Bearer DO-NOT-LOG-KEY"
             assert not allow_redirects
-            assert json["response_format"] == {"type": "json_object"}
+            assert json["response_format"]["type"] == "json_schema"
+            assert json["response_format"]["json_schema"]["strict"] is True
+            if model.startswith("openai/"):
+                assert json["reasoning_effort"] == "medium"
             return Response()
 
     monkeypatch.setattr(ai.aiohttp, "ClientSession", Client)
     if failure:
         with pytest.raises(ai.AnalysisUnavailable) as err:
-            await ai.request_review(settings, {"days": [{"date": str(START)}]})
+            await ai._completion(settings, ai.SYSTEM_PROMPT, good_payload(), tokens=3500)
         assert "PRIVATE-JOURNAL" not in str(err.value)
     else:
-        assert await ai.request_review(settings, {"days": [{"date": str(START)}]}) == good_review()
+        assert (
+            await ai._completion(settings, ai.SYSTEM_PROMPT, good_payload(), tokens=3500) == content
+        )
     assert "DO-NOT-LOG-KEY" not in caplog.text
     assert "PRIVATE-JOURNAL" not in caplog.text
 
@@ -317,7 +370,7 @@ async def test_http_contract_bounded_response_and_safe_logs(settings, monkeypatc
 async def test_credential_never_goes_to_another_host(settings):
     settings.llm_base_url = "https://example.com/openai/v1"
     with pytest.raises(ai.AnalysisUnavailable, match="адрес API Groq"):
-        await ai.request_review(settings, {})
+        await ai.request_review(settings, good_payload())
 
 
 async def test_database_failure_does_not_log_model_response(settings, monkeypatch, caplog):
@@ -356,6 +409,19 @@ async def test_history_callbacks_use_actor_and_validate_input(app_runtime, sessi
     assert state.data == {"best_event": "старый ответ"}
     await weekly.start_weekly(callback(f"wk:start:{START}"), state)
     assert "best_event" not in state.data
+
+
+async def test_ai_callback_renders_bound_sources_and_uses_callback_user(app_runtime, monkeypatch):
+    analyze = AsyncMock(return_value=(good_review(), True))
+    monkeypatch.setattr(ai, "analyze", analyze)
+    cb = callback(f"rv:a:{START}")
+    await review.browse(cb)
+    analyze.assert_awaited_once_with(app_runtime.settings, app_runtime.session_factory, 111, START)
+    rendered = "".join(cb.message.answers)
+    assert "Сохранённый обзор" in rendered
+    assert "Запись 26.10.2026 · Оценки: «День: 4/5" in rendered
+    assert "Что отметить:" in rendered
+    assert good_review().question.text in rendered
 
 
 async def test_real_dispatcher_browses_during_fsm_without_saving_menu_text(
