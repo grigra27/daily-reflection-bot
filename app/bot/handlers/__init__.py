@@ -14,6 +14,7 @@ from app.bot.handlers import (
     export,
     food,
     morning,
+    review,
     settings,
     start,
     stats,
@@ -25,6 +26,8 @@ from app.bot.handlers import (
 def build_root_router() -> Router:
     root = Router(name="root")
     root.include_router(start.router)
+    # Read-only browsing must also work during a diary FSM, before text answers.
+    root.include_router(review.router)
     root.include_router(morning.router)
     root.include_router(daily.router)
     root.include_router(stats.router)

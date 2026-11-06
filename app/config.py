@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     default_reminder_time: str = Field(alias="DEFAULT_REMINDER_TIME", default="23:00")
     default_morning_time: str = Field(alias="DEFAULT_MORNING_TIME", default="08:30")
     log_level: str = Field(alias="LOG_LEVEL", default="INFO")
+    llm_api_key: SecretStr = Field(alias="LLM_API_KEY", default=SecretStr(""))
+    llm_base_url: str = Field(alias="LLM_BASE_URL", default="https://api.groq.com/openai/v1")
+    llm_model: str = Field(alias="LLM_MODEL", default="qwen/qwen3.8-27b")
+    llm_timeout: float = Field(alias="LLM_TIMEOUT", default=45, ge=1, le=120)
 
     @field_validator("allowed_telegram_ids_raw")
     @classmethod

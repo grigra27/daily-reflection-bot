@@ -85,16 +85,18 @@ fi
 # --- verify the running container -----------------------------------------
 
 verify_running() {
+  local expected_image="${1:?expected image required}"
   # Poll real Docker state (not a fixed sleep) for up to ~90s. A version that
   # crashes during startup is caught two ways: it never reaches 'running', or it
   # reaches 'running' then flips to a restarting/exited state (RestartCount > 0).
   local required="${STABLE_SECONDS:-8}" poll="${POLL_SECONDS:-2}" ticks="${VERIFY_MAX_TICKS:-45}"
-  local state="" restarts="" stable_since=0 now elapsed
+  local state="" restarts="" running_image="" stable_since=0 now elapsed
   for _ in $(seq 1 "$ticks"); do
     state="$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)"
     restarts="$(docker inspect --format '{{.RestartCount}}' "$CONTAINER" 2>/dev/null || echo 0)"
+    running_image="$(docker inspect --format '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo missing)"
     now="$(date +%s)"
-    if [[ "$state" == "running" && "$restarts" == "0" ]]; then
+    if [[ "$state" == "running" && "$restarts" == "0" && "$running_image" == "$expected_image" ]]; then
       (( stable_since == 0 )) && stable_since="$now"
       elapsed=$(( now - stable_since ))
       if (( elapsed >= required )); then
@@ -117,9 +119,10 @@ verify_running() {
 
 deploy() {
   echo "IMAGE_REF=${IMAGE_REF}" > "$DEPLOY_ENV"
-  compose_pull
-  compose up -d --remove-orphans
-  verify_running
+  # deploy is called from an if: Bash disables errexit inside the function.
+  compose_pull || return 1
+  compose up -d --remove-orphans || return 1
+  verify_running "$IMAGE_REF"
 }
 
 # --- rollback -------------------------------------------------------------
@@ -141,7 +144,7 @@ rollback() {
   fi
 
   echo "IMAGE_REF=${PREV_IMAGE_REF}" > "$DEPLOY_ENV"
-  if compose_pull && compose up -d --remove-orphans && verify_running; then
+  if compose_pull && compose up -d --remove-orphans && verify_running "$PREV_IMAGE_REF"; then
     echo "rollback success"
   else
     echo "rollback failure"

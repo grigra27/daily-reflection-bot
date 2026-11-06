@@ -32,6 +32,23 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class WeeklyAnalysis(Base):
+    """One cached AI review per user/week; invalidated when its input changes."""
+
+    __tablename__ = "weekly_analyses"
+    __table_args__ = (UniqueConstraint("user_id", "week_start", name="uq_analysis_user_week"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    week_start: Mapped[date] = mapped_column(Date, nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class User(Base):
     __tablename__ = "users"
 

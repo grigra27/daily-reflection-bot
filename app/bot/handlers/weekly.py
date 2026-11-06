@@ -6,7 +6,7 @@ optional and can be skipped.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -14,11 +14,13 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot import keyboards, texts
 from app.bot.deps import AuthorizedFilter, PrivateChatFilter
+from app.bot.review_views import keyboard
 from app.bot.states import WeeklyStates
 from app.database.session import session_scope
 from app.runtime import get_runtime
-from app.services import weekly_service
+from app.services import review_service, weekly_service
 from app.services.auth_service import authorize
+from app.services.time_service import week_start_date
 
 router = Router(name="weekly")
 router.callback_query.filter(AuthorizedFilter(), PrivateChatFilter())
@@ -59,13 +61,26 @@ async def start_weekly(cb: CallbackQuery, state: FSMContext) -> None:
     # restart. Freeze that date into the FSM at flow start; a legacy button
     # without a date freezes the then-current week instead.
     parts = cb.data.split(":")  # type: ignore[union-attr]
-    if len(parts) > 2:
-        week_start = date.fromisoformat(parts[2])
-    else:
-        runtime = get_runtime()
+    runtime = get_runtime()
+    try:
         with session_scope(runtime.session_factory) as session:
             user = authorize(session, runtime.settings, cb.from_user.id)
-            week_start = weekly_service.current_week_start(user)
+            current_week = weekly_service.current_week_start(user)
+            week_start = date.fromisoformat(parts[2]) if len(parts) == 3 else current_week
+            if len(parts) not in (2, 3) or week_start.weekday() != 0:
+                raise ValueError("invalid week")
+            # Last Sunday's offer remains usable after Monday's rollover, even
+            # when no other records have been saved yet.
+            first = min(current_week - timedelta(days=7), week_start_date(
+                review_service.earliest_date(session, user, current_week + timedelta(days=6))
+            ))
+            review_service.validate_date(week_start, current_week, first)
+    except ValueError:
+        if cb.message:
+            await cb.message.answer("Эта неделя недоступна. Открой /week.")
+        return
+    if await state.get_state() or await state.get_data():
+        await state.clear()
     await state.update_data(week_start=week_start.isoformat())
     if cb.message:
         await _ask(cb.message, state, 0)
@@ -108,7 +123,9 @@ async def _save(message: Message, state: FSMContext, telegram_user_id: int) -> N
         )
     # Only drop the answers once the reflection is durably saved.
     await state.clear()
-    await message.answer(texts.WEEKLY_DONE)
+    await message.answer(texts.WEEKLY_DONE, reply_markup=keyboard([
+        [("📊 Открыть неделю", f"rv:w:{week_start}")]
+    ]) if week_start else None)
 
 
 # Text answers
