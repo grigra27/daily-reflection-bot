@@ -93,7 +93,7 @@ Groq история и обычная сводка продолжают рабо
 LLM_API_KEY=<ключ Groq>
 LLM_BASE_URL=https://api.groq.com/openai/v1
 LLM_MODEL=qwen/qwen3.8-27b
-LLM_TIMEOUT=45
+LLM_TIMEOUT=90
 ```
 
 Ключ необязателен: без него кнопка анализа скрыта. Используется асинхронный

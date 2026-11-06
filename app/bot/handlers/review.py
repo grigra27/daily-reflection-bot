@@ -165,7 +165,7 @@ async def browse(cb: CallbackQuery) -> None:
         await cb.answer()
         await _show(cb.message, cb.from_user.id, kind, value, edit=True)
         return
-    await cb.answer("Готовлю обзор — обычно это занимает несколько секунд.")
+    await cb.answer("Готовлю и проверяю обзор. Обычно быстро, при лимите Groq — до полутора минут.")
     runtime = get_runtime()
     try:
         start = date.fromisoformat(value)
