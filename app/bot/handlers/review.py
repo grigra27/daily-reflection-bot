@@ -9,7 +9,15 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot.deps import AuthorizedFilter, PrivateChatFilter
 from app.bot.keyboards.reply import BTN_HISTORY, BTN_WEEK
-from app.bot.review_views import chunks, date_label, day_text, keyboard, week_keyboard, week_text
+from app.bot.review_views import (
+    analysis_text,
+    chunks,
+    date_label,
+    day_text,
+    keyboard,
+    week_keyboard,
+    week_text,
+)
 from app.database.session import session_scope
 from app.runtime import get_runtime
 from app.services import ai_review_service, review_service
@@ -170,25 +178,15 @@ async def browse(cb: CallbackQuery) -> None:
     except ai_review_service.AnalysisUnavailable as exc:
         await cb.message.answer(str(exc), parse_mode=None)
         return
-    lines = [
-        f"🤖 ИИ-обзор недели с {date_label(start)}",
-        "Интерпретация Groq — проверь её по своим записям.",
-    ]
-    if cached:
-        lines.append("Сохранённый обзор; нового запроса к модели не было.")
-    for item in result.observations:
-        lines += ["", "• " + item.text, "Записи: " + ", ".join(date_label(d) for d in item.dates)]
-    lines += [
-        "",
-        "Небольшой эксперимент",
-        result.experiment.text,
-        "Записи: " + ", ".join(date_label(d) for d in result.experiment.dates),
-        "",
-        result.question,
-    ]
-    dates = sorted({d for item in [*result.observations, result.experiment] for d in item.dates})
+    dates = sorted(
+        {
+            d
+            for item in [*result.observations, result.experiment, result.question]
+            for d in item.dates
+        }
+    )
     rows = [
         [(date_label(d), f"rv:d:{d}") for d in dates[i : i + 3]] for i in range(0, len(dates), 3)
     ]
     rows.append([("📊 К неделе", f"rv:w:{start}")])
-    await _deliver(cb.message, "\n".join(lines), keyboard(rows))
+    await _deliver(cb.message, analysis_text(result, start, cached=cached), keyboard(rows))

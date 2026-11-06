@@ -28,6 +28,36 @@ def keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     )
 
 
+def analysis_text(result, start: date, *, cached: bool) -> str:
+    lines = [
+        f"🤖 ИИ-обзор недели с {date_label(start)}",
+        "Выводы Groq и исходные записи — интерпретацию можно оспорить.",
+    ]
+    if cached:
+        lines.append("Сохранённый обзор; нового запроса к модели не было.")
+
+    def evidence(item):
+        return [
+            ("Неделя с " if s.source_id.startswith("week:") else "Запись ")
+            + f"{date_label(s.date)} · {s.label}: «{s.quote}»"
+            for s in item.sources
+        ]
+
+    for item in result.observations:
+        lines += ["", "• " + item.text, *evidence(item)]
+    lines += [
+        "",
+        "Небольшой эксперимент",
+        result.experiment.text,
+        "Что отметить: " + result.experiment.check,
+        *evidence(result.experiment),
+        "",
+        result.question.text,
+        *evidence(result.question),
+    ]
+    return "\n".join(lines)
+
+
 def week_text(w: dict) -> str:
     s = w["summary"]
     lines = [f"📊 Неделя {date_label(w['start'])} — {date_label(w['end'])}"]
