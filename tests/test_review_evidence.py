@@ -87,11 +87,10 @@ def test_sources_cannot_be_invented_or_rebound(change):
         "Занятие было 31 октября.",
         "В субботу состоялось занятие.",
         "Вчера ты был бодрее.",
-        "Энергия поднялась до 5/5.",
         "26.10 произошла встреча.",
     ],
 )
-def test_chronology_and_numbers_cannot_be_rewritten_in_model_prose(text):
+def test_chronology_cannot_be_rewritten_in_model_prose(text):
     draft = good_draft()
     draft["observations"][0]["text"] = text
     with pytest.raises(ValueError):
@@ -235,6 +234,13 @@ async def test_provider_retry_after_is_obeyed_once(settings, monkeypatch):
     assert await ai._completion(settings, "system", {}, tokens=100) == "ok"
     assert once.await_count == 2
     sleep.assert_awaited_once_with(0.75)
+
+
+async def test_provider_json_generation_failure_is_retried_once(settings, monkeypatch):
+    once = AsyncMock(side_effect=[ai._InvalidCompletion(), "valid-json"])
+    monkeypatch.setattr(ai, "_completion_once", once)
+    assert await ai._completion(settings, "system", {}, tokens=100) == "valid-json"
+    assert once.await_count == 2
 
 
 @pytest.mark.parametrize("delay,expected_calls", [(None, 1), (0.5, 2)])

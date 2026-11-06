@@ -280,7 +280,9 @@ async def test_insufficient_data_and_provider_failure_not_cached(
     assert mock.await_count == 1 and session.query(WeeklyAnalysis).count() == 0
 
 
-@pytest.mark.parametrize("failure", [None, "429", "timeout", "json", "truncated", "large"])
+@pytest.mark.parametrize(
+    "failure", [None, "429", "timeout", "json", "truncated", "large", "generation", "schema"]
+)
 @pytest.mark.parametrize("model", ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"])
 async def test_http_contract_bounded_response_and_safe_logs(
     settings, monkeypatch, caplog, failure, model
@@ -302,6 +304,15 @@ async def test_http_contract_bounded_response_and_safe_logs(
         body = b"PRIVATE-JOURNAL"
     if failure == "large":
         body = b"x" * 70000
+    if failure in ("generation", "schema"):
+        body = json.dumps(
+            {
+                "error": {
+                    "code": "json_validate_failed" if failure == "generation" else "invalid_schema",
+                    "failed_generation": "PRIVATE-JOURNAL DO-NOT-LOG-KEY",
+                }
+            }
+        ).encode()
 
     class Stream:
         async def iter_chunked(self, n):
@@ -309,7 +320,7 @@ async def test_http_contract_bounded_response_and_safe_logs(
                 yield body[i : i + 7]
 
     class Response:
-        status = 429 if failure == "429" else 200
+        status = 429 if failure == "429" else (400 if failure in ("generation", "schema") else 200)
         content = Stream()
 
         def __init__(self):

@@ -20,12 +20,12 @@ class SourceQuote(StrictModel):
 
 
 class DraftEvidence(StrictModel):
-    text: str = Field(min_length=1, max_length=500, pattern=r"^[^\d]*$")
+    text: str = Field(min_length=1, max_length=500)
     sources: list[SourceQuote] = Field(min_length=1, max_length=4)
 
 
 class DraftExperiment(DraftEvidence):
-    check: str = Field(min_length=1, max_length=250, pattern=r"^[^\d]*$")
+    check: str = Field(min_length=1, max_length=250)
 
 
 class DraftReview(StrictModel):
@@ -151,9 +151,10 @@ def model_input(payload: dict) -> dict:
     }
 
 
-# Dates/numbers belong in exact source quotes, not regenerated factual prose.
+# Dates belong in bound citations. Scores may also appear in the interpretation.
 _CALENDAR = re.compile(
-    r"\d|\b(?:январ\w*|феврал\w*|март\w*|апрел\w*|ма[йяею]|июн\w*|июл\w*|август\w*|"
+    r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\.\d{1,2}\b|\b\d{1,2}-(?:го|е)\b|\b\d{1,2}\s+числа\b|"
+    r"\b(?:январ\w*|феврал\w*|март\w*|апрел\w*|ма[йяею]|июн\w*|июл\w*|август\w*|"
     r"сентябр\w*|октябр\w*|ноябр\w*|декабр\w*|понедельник\w*|вторник\w*|среду|"
     r"четверг\w*|пятниц\w*|суббот\w*|воскресень\w*|вчера|сегодня|завтра|накануне)\b",
     re.IGNORECASE,
@@ -171,11 +172,11 @@ def resolve_draft(raw: str, payload: dict) -> Review:
     items += [("experiment", draft.experiment), ("question", draft.question)]
     for name, item in items:
         if _CALENDAR.search(item.text):
-            raise ValueError(f"{name}.text: put dates and scores only in exact source quotes")
+            raise ValueError(f"{name}.text: put dates only in source citations")
         if len({s.source_id for s in item.sources}) != len(item.sources):
             raise ValueError("duplicate source")
     if _CALENDAR.search(draft.experiment.check):
-        raise ValueError("experiment.check: put dates and scores only in exact source quotes")
+        raise ValueError("experiment.check: put dates only in source citations")
     if re.search(r"\bили\b|что.{0,30}важнее|выбирай|выбери", draft.question.text, re.IGNORECASE):
         raise ValueError("question must not force a choice")
     if draft.question.text.count("?") != 1:

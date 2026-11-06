@@ -49,8 +49,8 @@ SYSTEM_PROMPT = """Ты помогаешь осмыслить дневник. П
 Не противопоставляй работу отдыху/хобби. Никаких диагнозов, морали и оценки личности.
 
 Каждый пункт подкрепи source_id и ДОСЛОВНЫМ фрагментом его text без склейки и исправлений.
-Для оценок копируй source.text целиком. Даты, дни недели и цифры — только в цитатах;
-приложение само покажет источники с датами. В собственных text/check их не пиши.
+Для оценок копируй source.text целиком. Приложение само покажет источники с датами:
+в собственных text/check не пиши даты и дни недели. Оценки можно упоминать точно по источникам.
 
 Эксперимент должен дать НОВУЮ информацию: день, настроение и энергия уже оцениваются
 каждый вечер, повторять их учёт бессмысленно. Предложи одну конкретную дополнительную
@@ -90,6 +90,10 @@ class _RateLimited(AnalysisUnavailable):
     def __init__(self, retry_after: float | None):
         super().__init__("Groq достиг лимита запросов. Попробуй чуть позже.")
         self.retry_after = retry_after
+
+
+class _InvalidCompletion(AnalysisUnavailable):
+    pass
 
 
 def enabled(settings: Settings) -> bool:
@@ -141,6 +145,11 @@ async def _completion(settings: Settings, system: str, value: dict, *, tokens: i
                 raise AnalysisUnavailable(str(exc)) from None
             # The pipeline's shared deadline also covers this provider-directed wait.
             await asyncio.sleep(exc.retry_after + 0.25)
+        except _InvalidCompletion:
+            if attempt:
+                raise AnalysisUnavailable(
+                    "Groq не смог сформировать проверяемый ответ. Попробуй позже."
+                ) from None
     raise AssertionError("unreachable")
 
 
@@ -192,6 +201,14 @@ async def _completion_once(settings: Settings, system: str, value: dict, *, toke
                     retry_after = float("nan")
                 valid_wait = math.isfinite(retry_after) and 0 <= retry_after <= settings.llm_timeout
                 raise _RateLimited(retry_after if valid_wait else None)
+            if response.status == 400:
+                error_body = bytearray()
+                async for chunk in response.content.iter_chunked(8192):
+                    error_body.extend(chunk)
+                    if len(error_body) > 65536:
+                        raise ValueError("error response too large")
+                if json.loads(error_body).get("error", {}).get("code") == "json_validate_failed":
+                    raise _InvalidCompletion("provider could not produce structured JSON")
             if response.status != 200:
                 logger.warning("Groq review failed: HTTP %d", response.status)
                 raise AnalysisUnavailable("Groq сейчас недоступен. Попробуй чуть позже.")
@@ -227,7 +244,7 @@ async def request_review(settings: Settings, payload: dict) -> Review:
                 except ValueError as exc:
                     value = {
                         **model_input(payload),
-                        "revision_required": "Исправь структуру, источники и дословность цитат. Даты/цифры только в цитатах. Вопрос без выбора и с одним знаком вопроса.",
+                        "revision_required": "Исправь структуру, источники и дословность цитат. Даты только в цитатах. Вопрос без выбора и с одним знаком вопроса.",
                         "validation_error": "invalid_json_or_schema"
                         if isinstance(exc, ValidationError)
                         else str(exc),
