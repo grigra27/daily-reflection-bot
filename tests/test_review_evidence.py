@@ -233,7 +233,17 @@ async def test_provider_retry_after_is_obeyed_once(settings, monkeypatch):
     monkeypatch.setattr(ai.asyncio, "sleep", sleep)
     assert await ai._completion(settings, "system", {}, tokens=100) == "ok"
     assert once.await_count == 2
-    sleep.assert_awaited_once_with(0.75)
+    sleep.assert_awaited_once_with(1.5)
+
+
+async def test_second_provider_wait_can_recover_without_unbounded_retries(settings, monkeypatch):
+    once = AsyncMock(side_effect=[ai._RateLimited(15), ai._RateLimited(7), "ok"])
+    sleep = AsyncMock()
+    monkeypatch.setattr(ai, "_completion_once", once)
+    monkeypatch.setattr(ai.asyncio, "sleep", sleep)
+    assert await ai._completion(settings, "system", {}, tokens=100) == "ok"
+    assert once.await_count == 3
+    assert [call.args[0] for call in sleep.await_args_list] == [16, 8]
 
 
 async def test_provider_json_generation_failure_is_retried_once(settings, monkeypatch):
@@ -243,7 +253,7 @@ async def test_provider_json_generation_failure_is_retried_once(settings, monkey
     assert once.await_count == 2
 
 
-@pytest.mark.parametrize("delay,expected_calls", [(None, 1), (0.5, 2)])
+@pytest.mark.parametrize("delay,expected_calls", [(None, 1), (0.5, 3)])
 async def test_rate_limit_retry_cannot_loop(settings, monkeypatch, delay, expected_calls):
     once = AsyncMock(side_effect=ai._RateLimited(delay))
     monkeypatch.setattr(ai, "_completion_once", once)

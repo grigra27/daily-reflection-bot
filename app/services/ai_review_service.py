@@ -166,19 +166,23 @@ def validate_result(raw: str, payload: dict) -> Review:
 
 
 async def _completion(settings: Settings, system: str, value: dict, *, tokens: int) -> str:
-    for attempt in range(2):
+    invalid_completions = 0
+    for attempt in range(3):
         try:
             return await _completion_once(settings, system, value, tokens=tokens)
         except _RateLimited as exc:
-            if attempt or exc.retry_after is None:
+            if attempt == 2 or exc.retry_after is None:
                 raise AnalysisUnavailable(str(exc)) from None
             # The pipeline's shared deadline also covers this provider-directed wait.
-            await asyncio.sleep(exc.retry_after + 0.25)
+            # Groq can return a shorter initial wait, then a second Retry-After.
+            # Leave a margin for rounded headers; never exceed the shared deadline.
+            await asyncio.sleep(exc.retry_after + 1)
         except _InvalidCompletion:
-            if attempt:
+            if invalid_completions or attempt == 2:
                 raise AnalysisUnavailable(
                     "Groq не смог сформировать проверяемый ответ. Попробуй позже."
                 ) from None
+            invalid_completions += 1
     raise AssertionError("unreachable")
 
 
